@@ -3071,6 +3071,7 @@ def menu_proxy(c):
         status = f"{G}● ON{RS}" if pcfg.get("enabled") else f"{DI}○ OFF{RS}"
         mode = pcfg.get("mode", "list")
         mode_lbl = {"list": "List", "vpngate": "VPNGate", "combo": "Combo (local+list)"}.get(mode, mode)
+        order_lbl = {"top": "Top", "random": "Random", "least": "Least Used"}.get(pcfg.get("proxy_order", "top"), "Top")
         tmp = "yes" if pcfg.get("use_public_tempmail") else "no"
         no_del = "ON" if pcfg.get("no_delete") else "OFF"
         prox = pm.load_proxies() if pm else []
@@ -3093,7 +3094,7 @@ def menu_proxy(c):
         print(box_mid(w))
         print(box_row(w, f"{Y}1.{RS} {W}Status{RS}         {status}"))
         print(box_row(w, f"{Y}2.{RS} {W}Mode{RS}           {mode_lbl}"))
-        print(box_row(w, f"{Y}3.{RS} {W}Proxy Order{RS}    {mode_lbl}"))
+        print(box_row(w, f"{Y}3.{RS} {W}Proxy Order{RS}    {order_lbl}"))
         print(box_row(w, f"{Y}4.{RS} {W}No Delete{RS}      {W}{no_del}{RS} {DI}(keep ALL failed proxies){RS}"))
         print(box_row(w, f"{Y}5.{RS} {W}Proxies{RS}         {len(prox)} total  {DI}prot:{len(pcfg.get('protected',[]))}{RS}"))
         print(box_row(w, f"   {DI}Last check:{RS}     {_last_check}"))
