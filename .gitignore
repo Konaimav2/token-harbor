@@ -1,1 +1,17 @@
-config/.gitignore
+# Secrets and config files
+.env
+.env.*
+config.json
+keys.txt
+used.txt
+imported.txt
+email-blacklist.txt
+key-checks.json
+webshare-emails.txt
+proxy.txt
+proxy-*.txt
+proxy-usage.json
+farm.log
+_key_debug.log
+__pycache__/
+*.pyc
