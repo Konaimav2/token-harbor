@@ -3427,6 +3427,85 @@ def menu_proxy(c):
             raw_input("  " + DI + "Press Enter" + RS)
 
 
+def menu_9router(c):
+    """Full 9router configuration: mode, base URL, auth, name."""
+    while True:
+        require_terminal(MIN_TERM_COLS, 10, "9router Settings")
+        cls()
+        m = c.get("router_mode", "local")
+        router = get_active_router(c)
+        w = box_w()
+        print("\n" + box_top(w))
+        print(box_title(w, "9ROUTER SETTINGS"))
+        print(box_mid(w))
+        
+        # Current settings display
+        name = router.get("name", m)
+        url = router.get("base_url", "http://localhost:20128")
+        auth = router.get("auth", "jwt_local")
+        prefix = c.get("import_prefix", "Harbor")
+        
+        print(box_row(w, f"{Y}1.{RS} {W}Mode{RS}           {G}{m}{RS}"))
+        print(box_row(w, f"{Y}2.{RS} {W}Base URL{RS}        {url[:40]}"))
+        print(box_row(w, f"{Y}3.{RS} {W}Auth mode{RS}       {auth}"))
+        print(box_row(w, f"{Y}4.{RS} {W}Name tag{RS}        {DI}{prefix}{RS} (import prefix)"))
+        print(box_row(w, f"{Y}5.{RS} {W}Test connection{RS}"))
+        print(box_mid(w))
+        print(box_row(w, f"{Y}E.{RS} {W}Back{RS}"))
+        print(box_bot(w))
+        
+        k = get_key()
+        if k in ('e', 'E', 'escape', 'ctrl-c'):
+            break
+        elif k == '1':
+            items = [("local", "Local", "http://localhost:20128"), ("remote", "Remote", "https://vibecode.omori.my.id")]
+            sel = pick_one("Select Router Mode", items)
+            if sel:
+                c["router_mode"] = sel[0]
+                save_cfg(c)
+                log("Router mode: " + sel[0], "ok")
+        elif k == '2':
+            url = raw_input(f"  Base URL [{url}]: ").strip()
+            if url:
+                c["router"][m]["base_url"] = url
+                save_cfg(c)
+                log("Base URL updated", "ok")
+        elif k == '3':
+            items = [("jwt_local", "JWT Local", "Generate JWT from ~/.9router/jwt-secret"), ("password", "Password", "Login with password (remote)")]
+            sel = pick_one("Select Auth Mode", items)
+            if sel:
+                c["router"][m]["auth"] = sel[0]
+                if sel[0] == "password":
+                    pw = raw_input("  Password: ").strip()
+                    if pw:
+                        c["router"][m]["password"] = pw
+                save_cfg(c)
+                log("Auth mode: " + sel[0], "ok")
+        elif k == '4':
+            prefix = raw_input(f"  Name tag/prefix [{prefix}]: ").strip()
+            if prefix:
+                c["import_prefix"] = prefix
+                save_cfg(c)
+                log("Import prefix: " + prefix, "ok")
+        elif k == '5':
+            log("Testing connection to " + url + "...", "info")
+            try:
+                import subprocess
+                r = subprocess.run([sys.executable, str(BASE / "import_tokenharbor.py"), "--router-base", url, "--dry-run", "--no-db-check"], capture_output=True, text=True, timeout=15)
+                if r.returncode == 0:
+                    log("Connection OK!", "ok")
+                    for line in (r.stdout or "").strip().split("\n")[-5:]:
+                        print(f"    {DI}{line}{RS}")
+                else:
+                    log("Connection failed: " + (r.stderr or r.stdout or "unknown")[:200], "warn")
+            except Exception as e:
+                log("Error: " + str(e)[:100], "warn")
+        elif k in ('r', 'R'):
+            pass
+        raw_input("  " + DI + "Press Enter" + RS)
+
+
+
 def menu_settings():
     c = load_cfg()
     while True:
@@ -3533,83 +3612,5 @@ if __name__ == "__main__":
         print("\n\n  " + G + "Bye!" + RS)
         sys.exit(0)
 
-
-
-def menu_9router(c):
-    """Full 9router configuration: mode, base URL, auth, name."""
-    while True:
-        require_terminal(MIN_TERM_COLS, 10, "9router Settings")
-        cls()
-        m = c.get("router_mode", "local")
-        router = get_active_router(c)
-        w = box_w()
-        print("\n" + box_top(w))
-        print(box_title(w, "9ROUTER SETTINGS"))
-        print(box_mid(w))
-        
-        # Current settings display
-        name = router.get("name", m)
-        url = router.get("base_url", "http://localhost:20128")
-        auth = router.get("auth", "jwt_local")
-        prefix = c.get("import_prefix", "Harbor")
-        
-        print(box_row(w, f"{Y}1.{RS} {W}Mode{RS}           {G}{m}{RS}"))
-        print(box_row(w, f"{Y}2.{RS} {W}Base URL{RS}        {url[:40]}"))
-        print(box_row(w, f"{Y}3.{RS} {W}Auth mode{RS}       {auth}"))
-        print(box_row(w, f"{Y}4.{RS} {W}Name tag{RS}        {DI}{prefix}{RS} (import prefix)"))
-        print(box_row(w, f"{Y}5.{RS} {W}Test connection{RS}"))
-        print(box_mid(w))
-        print(box_row(w, f"{Y}E.{RS} {W}Back{RS}"))
-        print(box_bot(w))
-        
-        k = get_key()
-        if k in ('e', 'E', 'escape', 'ctrl-c'):
-            break
-        elif k == '1':
-            items = [("local", "Local", "http://localhost:20128"), ("remote", "Remote", "https://vibecode.omori.my.id")]
-            sel = pick_one("Select Router Mode", items)
-            if sel:
-                c["router_mode"] = sel[0]
-                save_cfg(c)
-                log("Router mode: " + sel[0], "ok")
-        elif k == '2':
-            url = raw_input(f"  Base URL [{url}]: ").strip()
-            if url:
-                c["router"][m]["base_url"] = url
-                save_cfg(c)
-                log("Base URL updated", "ok")
-        elif k == '3':
-            items = [("jwt_local", "JWT Local", "Generate JWT from ~/.9router/jwt-secret"), ("password", "Password", "Login with password (remote)")]
-            sel = pick_one("Select Auth Mode", items)
-            if sel:
-                c["router"][m]["auth"] = sel[0]
-                if sel[0] == "password":
-                    pw = raw_input("  Password: ").strip()
-                    if pw:
-                        c["router"][m]["password"] = pw
-                save_cfg(c)
-                log("Auth mode: " + sel[0], "ok")
-        elif k == '4':
-            prefix = raw_input(f"  Name tag/prefix [{prefix}]: ").strip()
-            if prefix:
-                c["import_prefix"] = prefix
-                save_cfg(c)
-                log("Import prefix: " + prefix, "ok")
-        elif k == '5':
-            log("Testing connection to " + url + "...", "info")
-            try:
-                import subprocess
-                r = subprocess.run([sys.executable, str(BASE / "import_tokenharbor.py"), "--router-base", url, "--dry-run", "--no-db-check"], capture_output=True, text=True, timeout=15)
-                if r.returncode == 0:
-                    log("Connection OK!", "ok")
-                    for line in (r.stdout or "").strip().split("\n")[-5:]:
-                        print(f"    {DI}{line}{RS}")
-                else:
-                    log("Connection failed: " + (r.stderr or r.stdout or "unknown")[:200], "warn")
-            except Exception as e:
-                log("Error: " + str(e)[:100], "warn")
-        elif k in ('r', 'R'):
-            pass
-        raw_input("  " + DI + "Press Enter" + RS)
 
 
