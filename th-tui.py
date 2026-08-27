@@ -3462,6 +3462,7 @@ def menu_9router(c):
         name = router.get("name", m)
         url = router.get("base_url", "http://localhost:20128")
         auth = router.get("auth", "jwt_local")
+        rdb = router.get("remote_db", "")
         prefix = c.get("import_prefix", "Harbor")
         
         print(box_row(w, f"{Y}1.{RS} {W}Mode{RS}           {G}{m}{RS}"))
@@ -3469,6 +3470,7 @@ def menu_9router(c):
         print(box_row(w, f"{Y}3.{RS} {W}Auth mode{RS}       {auth}"))
         print(box_row(w, f"{Y}4.{RS} {W}Name tag{RS}        {DI}{prefix}{RS} (import prefix)"))
         print(box_row(w, f"{Y}5.{RS} {W}Test connection{RS}"))
+        print(box_row(w, f"{Y}6.{RS} {W}Remote DB{RS}       {rdb or 'not set'}"))
         print(box_mid(w))
         print(box_row(w, f"{Y}E.{RS} {W}Back{RS}"))
         print(box_bot(w))
@@ -3489,6 +3491,13 @@ def menu_9router(c):
                 c["router"][m]["base_url"] = url
                 save_cfg(c)
                 log("Base URL updated", "ok")
+        elif k == '6':
+            rdb = router.get("remote_db", "")
+            new_rdb = raw_input(f"  Remote DB (user@host) [{rdb}]: ").strip()
+            if new_rdb or new_rdb == "":
+                c["router"][m]["remote_db"] = new_rdb
+                save_cfg(c)
+                log("Remote DB updated", "ok")
         elif k == '3':
             items = [("jwt_local", "JWT Local", "Generate JWT from ~/.9router/jwt-secret"), ("password", "Password", "Login with password (remote)")]
             sel = pick_one("Select Auth Mode", items)
