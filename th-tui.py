@@ -840,24 +840,27 @@ def get_cloudmail_addresses():
                     em.append(p[0].strip())
     except Exception as e:
         elog(f"cloudmail addresses (file): {e}")
-    # 2. from cloudmail admin API (list all known inboxes)
+    # 2. from cloudmail admin API (list all known inboxes using wildcard)
     try:
+        log("Fetching cloudmail inboxes...", "info")
         req = urllib.request.Request(CM_BASE + "/api/public/genToken",
             data=json.dumps({"email": CM_ADMIN_EMAIL, "password": CM_ADMIN_PASSWORD}).encode(),
             headers=_cm_headers({"Content-Type": "application/json"}))
         with urllib.request.urlopen(req, timeout=10) as r:
             tok = json.loads(r.read())["data"]["token"]
-        req2 = urllib.request.Request(CM_BASE + "/api/accounts",
+        # Use wildcard to get all inboxes
+        req2 = urllib.request.Request(CM_BASE + "/api/public/emailList",
+            data=json.dumps({"toEmail": "*@*"}).encode(),
             headers=_cm_headers({"Content-Type": "application/json", "Authorization": tok}))
         with urllib.request.urlopen(req2, timeout=10) as r2:
-            data = json.loads(r2.read())
-            if isinstance(data, list):
-                for a in data:
-                    e = a.get("email", "")
-                    if e and "@" in e:
-                        em.append(e)
-    except Exception:
-        pass
+            data = json.loads(r2.read()).get("data", [])
+            # Extract unique emails from inbox data
+            for item in data:
+                e = item.get("toEmail", item.get("email", ""))
+                if e and "@" in e:
+                    em.append(e)
+    except Exception as e:
+        elog(f"cloudmail addresses (api): {e}")
     return sorted(set(em))
 
 
@@ -2502,12 +2505,6 @@ def menu_tokens():
         k = get_key()
         if k in ('b', 'B', 'escape', 'ctrl-c'):
             break
-        elif k == 'u' or k == 'U':
-            pcfg = c.get("proxy", {})
-            pcfg["use_public_tempmail"] = not pcfg.get("use_public_tempmail", False)
-            c["proxy"] = pcfg
-            save_cfg(c)
-            log("Public tempmail " + ("ON" if pcfg["use_public_tempmail"] else "OFF"), "ok")
         elif k == 'up':
             scroll = max(0, scroll - 1)
         elif k == 'down':
