@@ -2372,40 +2372,44 @@ def menu_batch():
     pm = _load_proxy_mod()
     ok = []
     delay = c.get("batch_delay", 30)
-    for i in range(n):
-        pct = (i + 1) * 100 // n
-        # separate line for progress so it doesn't overwrite account logs
-        print(f"  {progress(pct, f'({i+1}/{n})')}")
-        # resolve an address for this round (auto-pick inside run_full_flow)
-        email = None
-        if using_tempmail and pm:
-            email = pm.get_tempmail_from_pool() or pm.get_public_tempmail()
-            if not email:
-                log("Tempmail pool exhausted", "warn")
-                break
-        r = run_full_flow(c, email) if email else run_full_flow(c)
-        if r:
-            ok.append(r)
-            print(f"  ✓ {r.get('email','') if isinstance(r, dict) else (email or '')} OK")
-        else:
-            print(f"  ✗ {(email or '')} FAIL")
-        # ratelimit delay between accounts (from tokenharbour-farm: 60/30/15s)
-        if i < n - 1 and delay > 0:
-            log(f"Waiting {delay}s to avoid rate-limit...", "info")
-            time.sleep(delay)
-    if ok and (t in ("mailg", "cloudmail")):
-        # verification already done inside run_full_flow
-        if raw_input("  Import to 9router? (y/N): ").strip().lower() == "y":
-            pt = raw_input("  Provider type (openai/anthropic) [openai]: ").strip() or "openai"
-            for r in ok:
-                if r.get("api_key"):
-                    imp_router(r["api_key"], c, pt)
-    elif ok and using_tempmail:
-        if raw_input("  Import to 9router? (y/N): ").strip().lower() == "y":
-            pt = raw_input("  Provider type (openai/anthropic) [openai]: ").strip() or "openai"
-            for r in ok:
-                if r.get("api_key"):
-                    imp_router(r["api_key"], c, pt)
+    try:
+        for i in range(n):
+            pct = (i + 1) * 100 // n
+            # separate line for progress so it doesn't overwrite account logs
+            print(f"  {progress(pct, f'({i+1}/{n})')}")
+            # resolve an address for this round (auto-pick inside run_full_flow)
+            email = None
+            if using_tempmail and pm:
+                email = pm.get_tempmail_from_pool() or pm.get_public_tempmail()
+                if not email:
+                    log("Tempmail pool exhausted", "warn")
+                    break
+            r = run_full_flow(c, email) if email else run_full_flow(c)
+            if r:
+                ok.append(r)
+                print(f"  ✓ {r.get('email','') if isinstance(r, dict) else (email or '')} OK")
+            else:
+                print(f"  ✗ {(email or '')} FAIL")
+            # ratelimit delay between accounts (from tokenharbour-farm: 60/30/15s)
+            if i < n - 1 and delay > 0:
+                log(f"Waiting {delay}s to avoid rate-limit...", "info")
+                time.sleep(delay)
+    except KeyboardInterrupt:
+        print(f"\nBatch interrupted: {len(ok)}/{n} OK")
+    else:
+        if ok and (t in ("mailg", "cloudmail")):
+            # verification already done inside run_full_flow
+            if raw_input("  Import to 9router? (y/N): ").strip().lower() == "y":
+                pt = raw_input("  Provider type (openai/anthropic) [openai]: ").strip() or "openai"
+                for r in ok:
+                    if r.get("api_key"):
+                        imp_router(r["api_key"], c, pt)
+        elif ok and using_tempmail:
+            if raw_input("  Import to 9router? (y/N): ").strip().lower() == "y":
+                pt = raw_input("  Provider type (openai/anthropic) [openai]: ").strip() or "openai"
+                for r in ok:
+                    if r.get("api_key"):
+                        imp_router(r["api_key"], c, pt)
     raw_input("  " + DI + "Press Enter to continue..." + RS)
 
 
@@ -3080,7 +3084,7 @@ def menu_proxy(c):
         print(box_mid(w))
         print(box_row(w, f"{Y}1.{RS} {W}Status{RS}         {status}"))
         print(box_row(w, f"{Y}2.{RS} {W}Mode{RS}           {mode_lbl}"))
-        print(box_row(w, f"{Y}3.{RS} {W}Public tempmail{RS} {tmp}"))
+        print(box_row(w, f"{Y}3.{RS} {W}Proxy Order{RS}    {mode_lbl}"))
         print(box_row(w, f"{Y}4.{RS} {W}No Delete{RS}      {W}{no_del}{RS} {DI}(keep ALL failed proxies){RS}"))
         print(box_row(w, f"{Y}5.{RS} {W}Proxies{RS}         {len(prox)} total  {DI}prot:{len(pcfg.get('protected',[]))}{RS}"))
         print(box_row(w, f"   {DI}Last check:{RS}     {_last_check}"))
@@ -3116,11 +3120,16 @@ def menu_proxy(c):
                 c["proxy"] = pcfg
                 save_cfg(c)
         elif k == '3':
-            pcfg["use_public_tempmail"] = not pcfg.get("use_public_tempmail", False)
-            c["proxy"] = pcfg
-            save_cfg(c)
-            log("Public tempmail " + ("ON" if pcfg["use_public_tempmail"] else "OFF"), "ok")
-            raw_input("  " + DI + "Press Enter" + RS)
+            sel = pick_one("Proxy Order", [
+                ("top", "Top", "use first proxies in list"),
+                ("random", "Random", "random selection"),
+                ("least", "Least Used", "least recently used"),
+            ])
+            if sel:
+                pcfg["proxy_order"] = sel[0]
+                c["proxy"] = pcfg
+                save_cfg(c)
+                log("Proxy order: " + sel[0], "ok")
         elif k == '4':
             pcfg["no_delete"] = not pcfg.get("no_delete", False)
             c["proxy"] = pcfg
