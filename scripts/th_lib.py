@@ -25,7 +25,7 @@ SEND_URL = f"{BASE}/api/auth/send-verification-code"
 VERIFY_URL = f"{BASE}/api/auth/sign-up/verify-email"
 CREATE_URL = f"{BASE}/api/auth/sign-up/create-account"
 
-DEFAULT_PASSWORD = os.environ.get("DEFAULT_PASSWORD", "")
+DEFAULT_PASSWORD = "Jancok1927"
 
 # ── tempmail ─────────────────────────────────────────────────────────
 MAIL_TM_API = "https://api.mail.tm"
@@ -46,7 +46,7 @@ BYCF_HEADERS = {
     "Content-Type": "application/json",
     "Accept": "application/json",
     "x-bycf-version": "1.0.5",
-    "x-bycf-secret": os.environ.get("BYCF_SECRET", ""),
+    "x-bycf-secret": "shannz-secret-key-123",
 }
 
 ROUTER_BASE = "http://localhost:20128"
