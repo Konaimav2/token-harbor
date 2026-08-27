@@ -3510,7 +3510,11 @@ def menu_9router(c):
             log("Testing connection to " + url + "...", "info")
             try:
                 import subprocess
-                r = subprocess.run([sys.executable, str(BASE / "import" / "import_tokenharbor.py"), "--router-base", url, "--dry-run", "--no-db-check", "--file", str(BASE / "data" / "keys.txt")], capture_output=True, text=True, timeout=15)
+                _extra = ["--dry-run", "--no-db-check", "--file", str(BASE / "data" / "keys.txt")]
+                _pw = router.get("password")
+                if _pw:
+                    _extra += ["--router-password", _pw]
+                r = subprocess.run([sys.executable, str(BASE / "import" / "import_tokenharbor.py"), "--router-base", url] + _extra, capture_output=True, text=True, timeout=15)
                 if r.returncode == 0:
                     log("Connection OK!", "ok")
                     for line in (r.stdout or "").strip().split("\n")[-5:]:
