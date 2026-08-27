@@ -2505,6 +2505,12 @@ def menu_tokens():
         k = get_key()
         if k in ('b', 'B', 'escape', 'ctrl-c'):
             break
+        elif k == 'u' or k == 'U':
+            pcfg = c.get("proxy", {})
+            pcfg["use_public_tempmail"] = not pcfg.get("use_public_tempmail", False)
+            c["proxy"] = pcfg
+            save_cfg(c)
+            log("Public tempmail " + ("ON" if pcfg["use_public_tempmail"] else "OFF"), "ok")
         elif k == 'up':
             scroll = max(0, scroll - 1)
         elif k == 'down':
