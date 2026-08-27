@@ -1430,7 +1430,7 @@ def _ensure_deps(feature, auto=True):
     """Lazy-install a feature's dependencies via th-deps."""
     try:
         import importlib.util
-        spec = importlib.util.spec_from_file_location("thdeps", str(BASE / "th-deps.py"))
+        spec = importlib.util.spec_from_file_location("thdeps", str(BASE / "config" / "th-deps.py"))
         if spec and spec.loader:
             m = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(m)
@@ -3503,7 +3503,7 @@ def menu_9router(c):
             log("Testing connection to " + url + "...", "info")
             try:
                 import subprocess
-                r = subprocess.run([sys.executable, str(BASE / "import" / "import_tokenharbor.py"), "--router-base", url, "--dry-run", "--no-db-check"], capture_output=True, text=True, timeout=15)
+                r = subprocess.run([sys.executable, str(BASE / "import" / "import_tokenharbor.py"), "--router-base", url, "--dry-run", "--no-db-check", "--file", str(BASE / "data" / "keys.txt")], capture_output=True, text=True, timeout=15)
                 if r.returncode == 0:
                     log("Connection OK!", "ok")
                     for line in (r.stdout or "").strip().split("\n")[-5:]:
