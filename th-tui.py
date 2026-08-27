@@ -1977,7 +1977,7 @@ def imp_router(api_key, cfg=None, prov_type="openai", node_id="", force=False, p
         else:
             log("No password for remote router!", "warn")
     try:
-        r = subprocess.run([sys.executable, str(BASE / "import_tokenharbor.py"),
+        r = subprocess.run([sys.executable, str(BASE / "import" / "import_tokenharbor.py"),
                             "--router-base", base, "--file", str(KEYS_FILE)] + extra,
                            capture_output=True, text=True, timeout=120)
     except Exception as e:
@@ -3491,7 +3491,7 @@ def menu_9router(c):
             log("Testing connection to " + url + "...", "info")
             try:
                 import subprocess
-                r = subprocess.run([sys.executable, str(BASE / "import_tokenharbor.py"), "--router-base", url, "--dry-run", "--no-db-check"], capture_output=True, text=True, timeout=15)
+                r = subprocess.run([sys.executable, str(BASE / "import" / "import_tokenharbor.py"), "--router-base", url, "--dry-run", "--no-db-check"], capture_output=True, text=True, timeout=15)
                 if r.returncode == 0:
                     log("Connection OK!", "ok")
                     for line in (r.stdout or "").strip().split("\n")[-5:]:
