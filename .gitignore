@@ -1,0 +1,46 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*credentials*
+*secrets*
+*token*.txt
+*keys*.txt
+accounts.txt
+th-tui-config.json
+!th-tui-config.json.example
+cookies*.json
+storage-state*.json
+.chrome-profile*/
+.2fa-secrets
+.public-token
+
+# Config (live, with secrets)
+th-tui-config.json
+!th-tui-config.example.json
+
+# Database & runtime state
+inbox.db*
+*.db
+*.db-*
+*.sqlite*
+*-wal
+*-shm
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Browser / screenshots / logs
+screenshots/
+logs/
+*.log
+
+# Archives that duplicate secret-bearing source
+dup.zip
+
+# Backups
+_backup_files/
+# Live config with secrets (router password, etc.)
+config.json
