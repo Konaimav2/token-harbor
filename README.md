@@ -2,87 +2,53 @@
 
 Account farming + proxy management toolkit for Token Harbor / 9router / Webshare / xAI.
 
+## Quick Start
+
+```bash
+# 1. Install dependencies
+bash install.sh
+
+# 2. Copy and configure credentials
+cp .env.example .env
+chmod 600 .env
+# Edit .env with your credentials
+
+# 3. Run the main TUI
+python3 th-tui.py
+```
+
 ## Directory Structure
 
 ```
 token-harbor/
-├── th-tui.py              # Main interactive TUI (create/batch/verify/import/proxy/mail/settings)
-├── th-webshare.py         # Webshare proxy account farm (audio captcha solver, VNC optional)
-├── th-farm.py             # Batch account creator (reuse → reverify → fresh)
-├── th-proxy.py            # Proxy utilities (check/live/rotate/smart-pick)
-├── th-reverify.py         # Re-verify pending Token Harbor accounts
-├── th_lib.py              # Shared library (TH API, webshare, mail.tm)
-├── import_tokenharbor.py  # Import API keys to 9router
-├── install.sh             # One-shot deps + browser install
+├── th-tui.py              # Main interactive TUI
+├── th-webshare.py         # Webshare account farm
+├── th-farm.py             # Batch account creator
+├── th-proxy.py            # Proxy management
+├── th-reverify.py         # Re-verify pending accounts
+├── th_lib.py              # Shared library
+├── import_tokenharbor.py  # Import to 9router
+├── install.sh             # One-shot deps
 ├── run-webshare.sh        # Webshare launcher
-├── keys.txt → data/       # API keys (symlink, gitignored)
-├── config.json → config/  # Config (symlink, gitignored)
-├── proxy.txt → proxy/     # Proxy list (symlink, gitignored)
+├── .env.example           # Credential template
 │
 ├── scripts/               # Additional scripts
-│   ├── th-create.py       #   TH signup via system Chromium
-│   ├── th-deps.py         #   Lazy dependency manager
-│   ├── th-email-audit.py  #   Cloudmail email audit
-│   ├── th-email-manager.py #  Email management
-│   ├── th-freeplan.py     #   Free plan utilities
-│   ├── th-import.py       #   Alternative importer
-│   ├── th-l4.py           #   L4 TCP proxy tester
-│   ├── th-select.py       #   Token selection
-│   └── th-verify.py       #   Account verification
-│
 ├── import/                # Import tools
-│   └── tokenharbor.py     #   Legacy auto-signup
-│
 ├── tools/                 # Utilities
-│   ├── email-blacklist.py #   Blacklist emails
-│   ├── humanize.py        #   Anti-bot humanization
-│   ├── quick-check-inbox.py # Cloudmail inbox checker
-│   └── enable_free_models.py # Enable free models
-│
 ├── webshare/              # Webshare tools
-│   ├── verify-webshare.py #   Batch email activator
-│   ├── vnc-signup.py      #   TH signup via VNC
-│   └── vnc-signup-fresh.py #  Fresh VNC signup
-│
 ├── data/                  # Data files (gitignored)
-│   ├── keys.txt           #   API keys
-│   ├── used.txt           #   Used email addresses
-│   ├── imported.txt       #   Import history
-│   ├── email-blacklist.txt #  Blacklisted emails
-│   ├── key-checks.json    #   Key health cache
-│   └── webshare-emails.txt # Webshare email pool
-│
-├── config/                # Config files
-│   ├── .env               #   Secrets (gitignored)
-│   └── config.json        #   Settings (gitignored)
-│
+├── config/                # Config files (gitignored)
 ├── proxy/                 # Proxy files (gitignored)
-│   └── proxy.txt          #   Proxy list
-│
-├── logs/                  # Log files (gitignored)
-│
-└── temp/                  # Temporary/debug files
+├── logs/                  # Logs (gitignored)
+└── temp/                  # Temporary files
 ```
 
-## Quick Start
-
-```bash
-# Install dependencies
-bash install.sh
-
-# Run main TUI
-python3 th-tui.py
-
-# Or run webshare farm
-./run-webshare.sh
-```
-
-## Main Scripts (Root)
+## Main Scripts
 
 | Script | Description |
 |--------|-------------|
 | `th-tui.py` | Main interactive TUI — full management |
-| `th-webshare.py` | Webshare account farm with audio captcha solver |
+| `th-webshare.py` | Webshare farm with audio captcha solver |
 | `th-farm.py` | Batch account creator |
 | `th-proxy.py` | Proxy management |
 | `th-reverify.py` | Re-verify pending accounts |
@@ -90,7 +56,31 @@ python3 th-tui.py
 
 ## Configuration
 
-Live credentials go in `.env` (gitignored). Settings in `config.json` (gitignored).
+### Environment Variables (.env)
+
+```bash
+# Required
+CM_BASE_URL=https://your-cloudmail-worker.com
+CM_ADMIN_EMAIL=admin@yourdomain.com
+CM_ADMIN_PASSWORD=your-password
+
+# Optional
+TH_MAILG_TOKEN=your-token
+MAILG_URL=http://127.0.0.1:8790
+VNC_PASSWORD=your-vnc-password
+```
+
+### 9router Settings (in TUI)
+
+```
+Settings → B. 9router
+1. Mode: local/remote
+2. Base URL: http://localhost:20128 or https://vibecode.omori.my.id
+3. Auth mode: jwt_local/password
+4. Name tag: Custom import prefix
+5. Test connection
+6. Remote DB: user@host for SSH dedup
+```
 
 ## Features
 
@@ -101,6 +91,26 @@ Live credentials go in `.env` (gitignored). Settings in `config.json` (gitignore
 - **9router Import**: Parallel import with dedup protection
 - **Mail Server Integration**: CloudMail + MailG support
 - **Clear-based Mode**: Terminal-friendly UI (no alt-screen)
+
+## Commands
+
+```bash
+# Create account
+python3 th-tui.py  # Select "1. Create Account"
+
+# Batch create
+python3 th-tui.py  # Select "2. Batch Create"
+
+# Import to 9router
+python3 th-tui.py  # Select "4. Import to 9router"
+
+# Webshare farm
+./run-webshare.sh
+
+# Manual import
+python3 import_tokenharbor.py --router-base https://vibecode.omori.my.id \
+    --router-password your-password --force
+```
 
 ## License
 
