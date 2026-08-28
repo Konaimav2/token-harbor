@@ -2602,16 +2602,34 @@ def menu_tokens():
             chosen = pick_multi("Select account(s) to delete (Space to multi)", choices)
             if chosen:
                 emails = [e[0] for e in chosen]
+                # sanity: never proceed if we somehow selected 0 or ALL records (guard against wipe)
+                if not emails:
+                    log("No account selected — nothing deleted", "warn")
+                    continue
                 if raw_input(f"  Delete {len(emails)} account(s)? (y/N): ").strip().lower() == "y":
+                    # backup first
+                    import shutil, time as _t
+                    _bk = BASE / "_backup_files" / f"keys.txt.pre-delete-{int(_t.time())}"
+                    _bk.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy(KEYS_FILE, _bk)
                     lines = KEYS_FILE.read_text().splitlines()
-                    kept = [l for l in lines if not any(email in l for email in emails)]
-                    KEYS_FILE.write_text("\n".join(kept) + "\n")
+                    # exact-match on the email field only (column 0), never substring the whole line
+                    emset = set(emails)
+                    kept = []
+                    removed = 0
+                    for l in lines:
+                        field = l.split("|")[0].strip() if l else ""
+                        if field in emset:
+                            removed += 1
+                        else:
+                            kept.append(l)
+                    KEYS_FILE.write_text("\n".join(kept) + ("\n" if kept else ""))
                     for email in emails:
                         if email in checks:
                             del checks[email]
                     save_key_checks(checks)
                     keys = load_keys()
-                    log(f"Deleted {len(emails)} account(s)", "ok")
+                    log(f"Deleted {removed} account(s) (backup: {_bk.name})", "ok")
                     scroll = 0
         elif k in ('v', 'V'):
             # View FULL key for an account (copyable)
