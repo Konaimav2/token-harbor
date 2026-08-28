@@ -1949,6 +1949,8 @@ def _classify_key_check(works, reason):
         return "live"
     if "429" in r or "rate limit" in r or "ratelimit" in r:
         return "ratelimited"
+    if "402" in r or "can't serve" in r or "cannot serve" in r or "free plan" in r or "credit" in r or "insufficient" in r:
+        return "planlimited"
     if "401" in r or "unauthorized" in r:
         return "invalid"
     if "403" in r or "forbidden" in r:
@@ -1972,7 +1974,7 @@ def _cached_key_state(rec, checks):
         reason = str(ent.get("reason", "")).lower()
         if "403" in reason or "forbidden" in reason:
             return "forbidden"
-    return state if state in {"live", "ratelimited", "invalid", "forbidden", "failed"} else "unchecked"
+    return state if state in {"live", "ratelimited", "planlimited", "invalid", "forbidden", "failed"} else "unchecked"
 
 
 def _account_state(rec):
@@ -2000,7 +2002,7 @@ def _token_filter_match(rec, mode, checks):
 
 def _token_filter_counts(keys, checks):
     modes = (
-        "live", "ratelimited", "invalid", "forbidden", "failed", "unchecked", "no_key",
+        "live", "ratelimited", "planlimited", "invalid", "forbidden", "failed", "unchecked", "no_key",
         "verified", "nonverified", "unused",
     )
     return {m: sum(1 for rec in keys if _token_filter_match(rec, m, checks)) for m in modes}
@@ -2528,6 +2530,7 @@ def menu_tokens():
         "unused": "Unused emails",
         "live": "Live keys",
         "ratelimited": "429 rate-limited",
+        "planlimited": "402 plan-limited",
         "invalid": "401 invalid key",
         "forbidden": "403 forbidden",
         "failed": "Failed/network",
@@ -2575,6 +2578,7 @@ def menu_tokens():
                 health_plain, health_color = {
                     "live": ("LIVE", G),
                     "ratelimited": ("429", Y),
+                    "planlimited": ("402", C),
                     "invalid": ("401", R),
                     "forbidden": ("403", M),
                     "failed": ("FAIL", R),
@@ -2633,6 +2637,7 @@ def menu_tokens():
                 ("unused", "Account: Unused email", str(counts["unused"])),
                 ("live", "Key: Live", str(counts["live"])),
                 ("ratelimited", "Key: 429 rate-limited", str(counts["ratelimited"])),
+                ("planlimited", "Key: 402 plan-limited", str(counts["planlimited"])),
                 ("invalid", "Key: 401 invalid", str(counts["invalid"])),
                 ("forbidden", "Key: 403 forbidden", str(counts["forbidden"])),
                 ("failed", "Key: Failed/network", str(counts["failed"])),
@@ -2670,7 +2675,7 @@ def menu_tokens():
                     }
 
             save_key_checks(checks)
-            state_counts = {m: 0 for m in ("live", "ratelimited", "invalid", "forbidden", "failed")}
+            state_counts = {m: 0 for m in ("live", "ratelimited", "planlimited", "invalid", "forbidden", "failed")}
             for rec in checkable:
                 ent = checks.get(rec["email"], {})
                 state = ent.get("state", "failed")
@@ -2678,7 +2683,7 @@ def menu_tokens():
                     state_counts[state] += 1
             log(
                 f"Check complete: {state_counts['live']} live | "
-                f"{state_counts['ratelimited']} 429 | {state_counts['invalid']} 401 | "
+                f"{state_counts['ratelimited']} 429 | {state_counts['planlimited']} 402 | {state_counts['invalid']} 401 | "
                 f"{state_counts['forbidden']} 403 | {state_counts['failed']} failed",
                 "ok" if state_counts["live"] else "warn"
             )
