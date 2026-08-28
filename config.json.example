@@ -1,0 +1,51 @@
+{
+  "active_mail": "CloudMail",
+  "mail_servers": [
+    {
+      "name": "Gmail Inbox",
+      "type": "mailg",
+      "create_new_mail": false,
+      "emails": [
+        "your-account@gmail.com"
+      ]
+    },
+    {
+      "name": "CloudMail",
+      "type": "cloudmail",
+      "domain": "furries.my.id",
+      "create_new_mail": true,
+      "domains": [
+        "furries.my.id",
+        "konaima.qzz.io",
+        "konaima.tech"
+      ]
+    }
+  ],
+  "import_prefix": "Harbor",
+  "router_mode": "local",
+  "router": {
+    "local": {
+      "name": "Local",
+      "base_url": "http://localhost:20128"
+    },
+    "remote": {
+      "name": "Remote",
+      "base_url": "https://vibecode.omori.my.id",
+      "auth": "password",
+      "password": "YOUR_9ROUTER_PASSWORD",
+      "remote_db": ""
+    }
+  },
+  "proxy": {
+    "enabled": true,
+    "mode": "list",
+    "proxy_order": "top",
+    "use_public_tempmail": false,
+    "no_delete": false,
+    "protected": [],
+    "current": 0,
+    "last_live": [],
+    "last_dead": []
+  },
+  "dot_trick": false
+}

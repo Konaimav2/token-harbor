@@ -1,7 +1,9 @@
 # Secrets and config files
 .env
 .env.*
+!.env.example
 config.json
+!config.json.example
 keys.txt
 used.txt
 imported.txt
