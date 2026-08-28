@@ -84,14 +84,13 @@ def mark_imported(key):
         f.write(_md5(key) + "\n")
 
 
-def get_connected_keys(db_path=None):
+def get_connected_keys(db_path=None, remote_db=None):
     """Get the set of apiKeys already connected in the 9router DB.
 
     Source of truth (in order):
       1. explicit --db path
       2. local DB paths (9router runs on this host)
-      3. REMOTE papi DB via SSH (9router docker lives on 162.35.169.101).
-         This is what actually matters here — the local machine has no DB.
+      3. REMOTE papi DB via SSH (if --remote-db provided)
     Returns None only if every source failed (caller then falls back to local cache).
     """
     candidates = [db_path] if db_path else DB_PATHS
@@ -117,6 +116,23 @@ def get_connected_keys(db_path=None):
                 return keys
         except Exception as e:
             warnlog(f"DB read error: {e}")
+    
+    # Try remote DB via SSH
+    if remote_db:
+        try:
+            import subprocess as _sp
+            from pathlib import Path as _Path
+            ssh = f"ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=no {remote_db}"
+            helper = str(_Path(__file__).resolve().parent.parent / "_remote_dedup.py")
+            r = _sp.run(f"{ssh} python3 -", shell=True,
+                        input=open(helper).read(), capture_output=True, text=True, timeout=30)
+            if r.returncode == 0 and r.stdout.strip():
+                keys = {ln.strip() for ln in r.stdout.splitlines() if ln.strip()}
+                infolog(f"{len(keys)} key terhubung (dari remote DB via SSH)")
+                return keys
+            warnlog(f"Remote DB SSH failed: {r.stderr.strip()[:120] or 'no output'}")
+        except Exception as e:
+            warnlog(f"Remote DB SSH error: {str(e)[:120]}")
     return None
 
 
@@ -298,6 +314,7 @@ def main():
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--db", default=None)
+    ap.add_argument("--remote-db", default=None, help="SSH user@host for remote 9router DB")
     ap.add_argument("--no-db-check", action="store_true")
     ap.add_argument("--allow-unverified", action="store_true",
                     help="import meskipun key unverified")
@@ -351,7 +368,7 @@ def main():
     connected = None
     db_read_ok = False
     if not args.no_db_check:
-        connected = get_connected_keys(args.db)
+        connected = get_connected_keys(args.db, args.remote_db)
         if connected is None:
             infolog("DB 9router tidak terbaca (deteksi duplikat dilewati)")
         else:
@@ -475,7 +492,7 @@ def main():
         print("\n  === DRY-RUN ===")
         _used = set(used_names)
         for i, (email, key) in enumerate(pending, 1):
-            name = unique_name(f"{args.prefix} {i}", _used)
+            name = unique_name(f"{args.prefix}_{i}", _used)
             _used.add(name)
             print(f"  POST {args.router_base}/api/providers")
             print(f"    name={name!r}")
@@ -485,7 +502,7 @@ def main():
 
     def _import_one(email, key, i):
         """POST one key to 9router. Returns (email, name, priority, status, detail)."""
-        name = f"{args.prefix} {i}"
+        name = f"{args.prefix}_{i}"
         priority = start_pri + (i - start_conn)
         payload = {"provider": target, "apiKey": key, "name": name,
                    "priority": priority, "defaultModel": default_model, "testStatus": "unknown"}
