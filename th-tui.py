@@ -2489,7 +2489,13 @@ def menu_tokens():
                 health = f"{health_color}{health_plain:<5}{RS}"
 
                 e = rec["email"][:24]
-                print(box_row(w, f"{B}{i:02}.{RS} {account}{DI}|{RS} {health}{DI}|{RS} {W}{e}{RS}"))
+                k_ = rec.get("api_key", "") or ""
+                # show a hint of the key in list
+                if k_:
+                    kdisp = f"{DI}{k_[:10]}...{k_[-6:]}{RS}"
+                else:
+                    kdisp = f"{DI}(no key){RS}"
+                print(box_row(w, f"{B}{i:02}.{RS} {account}{DI}|{RS} {health}{DI}|{RS} {W}{e}{RS} {kdisp}"))
 
         if total > win_sz:
             print(box_row(w, f"  {DI}▼ Page {scroll+1}:{win_sz}|{total}{RS} ▼"))
@@ -2500,7 +2506,7 @@ def menu_tokens():
         print(box_row(w, f"{Y}K.{RS} {W}Check API keys{RS}   {DI}{checkable_n}/{source_total} checkable{RS}"))
         print(box_row(w, f"{Y}B.{RS} {W}Back{RS}"))
         print(box_bot(w))
-        print_hint(f"{DI}↑↓ · PgUp/PgDn · F=Filter · K=Check All · C=Check One · D=Delete · B=Back{RS}")
+        print_hint(f"{DI}↑↓ · PgUp/PgDn · F=Filter · K=Check All · C=Check One · V=View Key · D=Delete · B=Back{RS}")
 
         k = get_key()
         if k in ('b', 'B', 'escape', 'ctrl-c'):
@@ -2605,6 +2611,24 @@ def menu_tokens():
                     keys = load_keys()
                     log(f"Deleted {email}", "ok")
                     scroll = 0
+        elif k in ('v', 'V'):
+            # View FULL key for an account (copyable)
+            if not view:
+                log("No records", "warn")
+                continue
+            choices = [(rec["email"], rec["email"], rec.get("api_key", "")[:20]) for rec in view]
+            chosen = pick_one("Select account to view key", choices)
+            if chosen:
+                email = chosen[0]
+                rec = next((x for x in keys if x.get("email") == email), None)
+                if rec and rec.get("api_key"):
+                    print("\n  " + W + BD + "API KEY:" + RS)
+                    print("  " + Y + rec["api_key"] + RS)
+                    print("  " + DI + "Email: " + rec.get("email", "") + RS)
+                    raw_input("  " + DI + "Press Enter to copy & continue..." + RS)
+                else:
+                    log(f"No API key for {email}", "warn")
+                    raw_input("  " + DI + "Press Enter" + RS)
         elif k in ('c', 'C'):
             # Check a specific account's key
             if not view:
