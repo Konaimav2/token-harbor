@@ -519,7 +519,7 @@ def render_list(title, items, selected=None, cursor=0, multi=False, scroll=0,
     win_sz = max(1, term_rows - 8)
     total = len(items)
 
-    print("\n" + box_top(w))
+    print(box_top(w))
     shown_title = title
     if searchable and query:
         base_total = source_total if source_total is not None else total
@@ -2457,7 +2457,7 @@ def menu_tokens():
         title = "TOKENS (" + str(source_total) + ")"
         if filter_mode != "all":
             title = f"TOKENS [{total}/{source_total} · {filter_labels[filter_mode]}]"
-        print("\n" + box_top(w))
+        print(box_top(w))
         print(box_title(w, title))
         print(box_mid(w))
 
@@ -2500,7 +2500,7 @@ def menu_tokens():
         print(box_row(w, f"{Y}K.{RS} {W}Check API keys{RS}   {DI}{checkable_n}/{source_total} checkable{RS}"))
         print(box_row(w, f"{Y}B.{RS} {W}Back{RS}"))
         print(box_bot(w))
-        print_hint(f"{DI}↑↓ · PgUp/PgDn · F=Filter · K=Check · B=Back{RS}")
+        print_hint(f"{DI}↑↓ · PgUp/PgDn · F=Filter · K=Check All · C=Check One · D=Delete · B=Back{RS}")
 
         k = get_key()
         if k in ('b', 'B', 'escape', 'ctrl-c'):
@@ -2582,6 +2582,53 @@ def menu_tokens():
                 "ok" if state_counts["live"] else "warn"
             )
             raw_input("  " + DI + "Press Enter to continue..." + RS)
+        elif k in ('d', 'D'):
+            # Delete a specific key/account
+            if not view:
+                log("No records to delete", "warn")
+                continue
+            choices = [(rec["email"], rec["email"], rec.get("api_key", "")[:20]) for rec in view]
+            chosen = pick_one("Select account to delete", choices)
+            if chosen:
+                email = chosen[0]
+                # confirm
+                if raw_input(f"  Delete {email}? (y/N): ").strip().lower() == "y":
+                    # remove from keys.txt
+                    lines = KEYS_FILE.read_text().splitlines()
+                    kept = [l for l in lines if email not in l]
+                    KEYS_FILE.write_text("\n".join(kept) + "\n")
+                    # remove from checks
+                    if email in checks:
+                        del checks[email]
+                        save_key_checks(checks)
+                    # reload
+                    keys = load_keys()
+                    log(f"Deleted {email}", "ok")
+                    scroll = 0
+        elif k in ('c', 'C'):
+            # Check a specific account's key
+            if not view:
+                log("No records to check", "warn")
+                continue
+            choices = [(rec["email"], rec["email"], rec.get("api_key", "")[:20]) for rec in view]
+            chosen = pick_one("Select account to check", choices)
+            if chosen:
+                email = chosen[0]
+                rec = next((x for x in keys if x.get("email") == email), None)
+                if rec and rec.get("api_key"):
+                    log(f"Checking {email}...", "arr")
+                    works, why = _test_key(rec["api_key"])
+                    checks[email] = {
+                        "fingerprint": _key_fingerprint(rec["api_key"]),
+                        "state": _classify_key_check(works, why),
+                        "reason": str(why)[:160],
+                        "checked_at": int(time.time()),
+                    }
+                    save_key_checks(checks)
+                    log(f"{email}: {'LIVE' if works else 'FAIL'} ({why})", "ok" if works else "warn")
+                else:
+                    log(f"No API key for {email}", "warn")
+                raw_input("  " + DI + "Press Enter to continue..." + RS)
 
 
 
@@ -2613,9 +2660,9 @@ def menu_import():
     # existing TokenHarbor connection, or auto-creates a 'TokenHarbor' node.
     log("Auto-detecting TokenHarbor provider node...", "info")
     log("Importing " + str(len(valid)) + " keys to " + rname + " (" + ptype[0] + ") prefix='" + c.get("import_prefix", "Harbor") + "'...", "arr")
-    for k in valid:
-        log(k["email"][:25] + "...", "info")
-        imp_router(k["api_key"], c, ptype[0], force=force, prefix=c.get("import_prefix", "Harbor"))
+    # Batch import all at once (single subprocess — no duplicate connections)
+    keys_list = [f"{k['email']}|{k['password']}|{k['api_key']}|ok" for k in valid]
+    imp_router(None, c, ptype[0], force=force, prefix=c.get("import_prefix", "Harbor"), keys_list=keys_list)
     raw_input("  " + DI + "Press Enter to continue..." + RS)
 
 
@@ -2634,7 +2681,7 @@ def menu_mail_servers(c):
         total = len(servers)
         if scroll > max(0, total - win_sz):
             scroll = max(0, total - win_sz)
-        print("\n" + box_top(w))
+        print(box_top(w))
         print(box_title(w, "MAIL SERVERS (" + str(total) + ") · F=SEARCH"))
         print(box_mid(w))
         if servers:
@@ -2904,7 +2951,7 @@ def menu_options(c):
         ms = get_active_mail(c)
         show_prefix = ms and ms.get("create_new_mail")
         w = box_w()
-        print("\n" + box_top(w))
+        print(box_top(w))
         print(box_title(w, "OPTIONS"))
         print(box_mid(w))
         items = []
@@ -3089,7 +3136,7 @@ def menu_proxy(c):
         _dead_n = pcfg.get("last_dead")
         _last_check = (f"{G}{_live_n} live{RS} / {C}{_dead_n} failed{RS}"
                        if _live_n is not None and _dead_n is not None else f"{DI}not checked{RS}")
-        print("\n" + box_top(w))
+        print(box_top(w))
         print(box_title(w, "PROXY SETTINGS · F=SEARCH"))
         print(box_mid(w))
         print(box_row(w, f"{Y}1.{RS} {W}Status{RS}         {status}"))
@@ -3454,7 +3501,7 @@ def menu_9router(c):
         m = c.get("router_mode", "local")
         router = get_active_router(c)
         w = box_w()
-        print("\n" + box_top(w))
+        print(box_top(w))
         print(box_title(w, "9ROUTER SETTINGS"))
         print(box_mid(w))
         
@@ -3550,7 +3597,7 @@ def menu_settings():
         rname = router.get("name", rmode)
         prefix = c.get("import_prefix", "Harbor")
         w = box_w()
-        print("\n" + box_top(w))
+        print(box_top(w))
         print(box_title(w, "SETTINGS"))
         print(box_mid(w))
         vnc = f"{G}● ON{RS}" if c.get("vnc_mode") else f"{DI}○ OFF{RS}"
@@ -3591,7 +3638,7 @@ def main():
                 banner = "TH-TUI"
             elif w < len(banner) + 4:
                 banner = "TH-TUI  TH Acc. Creator · v12"
-            print("\n" + box_top(w))
+            print(box_top(w))
             print(box_title(w, banner))
             print(box_mid(w))
             print(box_row(w, f"{G}{BD}MAIN MENU{RS}"))
