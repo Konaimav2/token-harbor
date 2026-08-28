@@ -2,7 +2,19 @@
 
 Full-stack account farming + proxy management toolkit for **TokenHarbor**, **9router**, **Webshare**, **CloudMail**, and **MailG**.
 
-> 🖤 A lazy senior-dev tool: stdlib-first, no bloat, terminal-native.
+> 🖤 Lazy-senior-dev tool: stdlib-first, terminal-native, no bloat.
+
+---
+
+## Table of Contents
+
+1. [Quick Start](#quick-start)
+2. [Directory Structure](#directory-structure)
+3. [Main TUI (th-tui.py)](#main-tui-th-tuipy)
+4. [TUI Menus & Keys](#tui-menus--keys)
+5. [CLI Scripts](#cli-scripts)
+6. [Configuration Files](#configuration-files)
+7. [Features](#features)
 
 ---
 
@@ -31,21 +43,21 @@ token-harbor/
 ├── th-tui.py              # Main interactive TUI (everything in one place)
 ├── th-webshare.py         # Webshare registration farm (audio captcha solver)
 ├── th-farm.py             # Batch account creator
-├── th-proxy.py            # Proxy management
+├── th-proxy.py            # Proxy management library
 ├── th-reverify.py         # Re-verify pending accounts
 ├── th_lib.py              # Shared library (colors, helpers, JWT)
 ├── import_tokenharbor.py  # Import verified keys → 9router
 ├── install.sh             # One-shot dependency installer
 ├── run-webshare.sh        # Webshare launcher
-├── .env.example           # Credential template (see below)
-├── config.json.example    # Config template (see below)
+├── .env.example           # Credential template
+├── config.json.example    # Config template
 │
 ├── scripts/               # Additional scripts
 ├── import/                # Import helpers
-├── tools/                 # Utilities
+├── tools/                 # Utilities (enable_free_models, etc.)
 ├── webshare/              # Webshare tools
 ├── data/                  # Data files (keys.txt, imported.txt) — gitignored
-├── config/                # Config files — gitignored
+├── config/                # Config files (grok.py, th-deps.py) — gitignored
 ├── proxy/                 # Proxy files — gitignored
 ├── logs/                  # Logs — gitignored
 └── temp/                  # Temporary files
@@ -53,7 +65,7 @@ token-harbor/
 
 ---
 
-## The TUI (th-tui.py)
+## Main TUI (th-tui.py)
 
 The main interface. Launch with `python3 th-tui.py`.
 
@@ -68,33 +80,58 @@ MAIN MENU
 E. Exit
 ```
 
-### Menu Navigation
+### Navigation
 - **Number keys / Enter** — select option
 - **↑↓ / PgUp/PgDn / Home/End** — scroll lists
 - **Space** — multi-select (in pickers)
 - **Esc / B** — back / cancel
 - **Ctrl+C** — abort batch, exit
+- **F** — search/filter (in most pickers)
 
-### Token Menu (3. View Tokens)
+---
+
+## TUI Menus & Keys
+
+### 3. View Tokens
 ```
 F=Filter · K=Check All · C=Check One · V=View Key · D=Delete · B=Back
 ```
-- **F** — filter by account/key status (live, 429, 401, 403, failed, etc.)
+- **F** — filter by account/key status (live, 429, 401, 402, 403, failed, no_key, etc.)
 - **K** — check all API keys in parallel
 - **C** — check one account's key
 - **V** — view full API key (Space to multi-select)
-- **D** — delete account(s) from keys.txt (Space to multi-select)
+- **D** — delete account(s) from keys.txt (Space to multi-select, exact-email match + auto-backup)
 
-### Settings (5. Settings)
+**Key health states:**
+| State | Meaning |
+|-------|---------|
+| LIVE | Key works, free model OK |
+| 429 | Rate-limited (free allowance used, resets in period) |
+| 402 | Plan-limited (free models can't serve — account-level) |
+| 401 | Invalid key (auth rejection) |
+| 403 | Forbidden (email not verified yet) |
+| FAIL | Genuine network failure (timeout, tunnel, etc.) |
+| NOKEY | Account has no API key |
+
+### 5. Settings
 ```
-A. Mail Server   active server (Gmail Inbox / CloudMail)
+A. Mail Server   active server (Gmail Inbox / CloudMail / custom)
 B. 9router       local/remote config
 C. VNC           display toggle
-D. Options       email prefix, dot trick, etc.
+D. Options       email prefix, password, batch, delay, dot-trick
 E. Back
 ```
 
-### 9router Settings (B)
+### 5A. Mail Servers
+```
+C=Create E=Pick #=Active A=Add D=Del T=Toggle U=Temp F=Search B=Back
+```
+- **U** — toggle Public Tempmail (free mail.tm emails when no server)
+- **C** — switch server to Create-new mode
+- **E** — switch server to Pick-existing mode
+- **#** — number key sets active server
+
+### 5B. 9router Settings
 ```
 1. Mode           local / remote
 2. Base URL       http://localhost:20128 or https://vibecode.omori.my.id
@@ -104,7 +141,17 @@ E. Back
 6. Remote DB      user@host (SSH dedup against remote 9router DB)
 ```
 
-### Proxy Settings (6. Proxy)
+### 5D. Options
+```
+1. Email Prefix     (only shown when active server is Create-new mode)
+2. Account Password (default random)
+3. Batch Count      default 3
+4. Batch Delay      rate-limit seconds, default 30
+5. Playwright Timeout  default 120s
+6. Gmail Dot-Trick  ON/OFF
+```
+
+### 6. Proxy
 ```
 1. Status         ON/OFF
 2. Mode           List / VPNGate / Combo (local+list)
@@ -115,21 +162,16 @@ P. Protect        protected proxies
 A. Add proxy      http(s)/socks5 with/without auth
 F. Search proxies
 D. Delete proxy
-C. Check live     2-pass; asks before purge
+C. Check live     2-pass; asks before purge (results cached → auto-override)
 S. Scrape fresh   set count, pull from lists
 L. Add local      proxy-controller :7920/:8118
 R. Run proxy-ctrl start/stop bundled
+M. Manual proxy   set a locked proxy that overrides auto-check
 ```
-
-### Mail Servers (A)
-```
-C=Create E=Pick #=Active A=Add D=Del T=Toggle U=Temp F=Search B=Back
-```
-- **U** — toggle Public Tempmail (free emails when no server)
 
 ---
 
-## CLI Scripts & Parameters
+## CLI Scripts
 
 ### import_tokenharbor.py
 Import verified keys from keys.txt to a 9router instance.
@@ -138,8 +180,8 @@ Import verified keys from keys.txt to a 9router instance.
 python3 import_tokenharbor.py [options]
 ```
 
-| Parameter | Description |
-|-----------|-------------|
+| Option | Description |
+|--------|-------------|
 | `--file PATH` | keys file (default `data/keys.txt`) |
 | `--router-base URL` | 9router base URL |
 | `--router-password PW` | remote 9router password (auth_mode=password) |
@@ -184,8 +226,8 @@ Webshare account registration farm with audio captcha solving.
 python3 th-webshare.py [options]
 ```
 
-| Parameter | Description |
-|-----------|-------------|
+| Option | Description |
+|--------|-------------|
 | `--count N` | number of accounts to register (default 1) |
 | `--vnc` | visible browser (manual captcha) |
 | `--cleanup-vnc` | kill leftover Xvfb/Chromium on exit (frees :99) |
@@ -216,21 +258,28 @@ python3 th-webshare.py --vnc --cleanup-vnc
 Batch account creation helper.
 
 ```bash
-python3 th-farm.py [options]
+python3 th-farm.py [count] [--workers N] [--delay S]
 ```
 
 ### th-reverify.py
 Re-verify pending accounts across multiple passes.
 
 ```bash
-python3 th-reverify.py [options]
+python3 th-reverify.py
 ```
 
 ### th-proxy.py
-Proxy management (check, rotate, smart-pick).
+Proxy management library (check, rotate, smart-pick) — used by the TUI proxy menu.
 
 ```bash
-python3 th-proxy.py [options]
+python3 th-proxy.py
+```
+
+### tools/enable_free_models.py
+Enable free-model consent for accounts (logs into dashboard, clicks consent).
+
+```bash
+PYTHONPATH=config:tools python3 tools/enable_free_models.py [--email user@x.com] [--all] [--dry-run] [--file keys.txt]
 ```
 
 ---
@@ -258,12 +307,25 @@ See `config.json.example` for the template.
 | Key | Description |
 |-----|-------------|
 | `active_mail` | active mail server name |
-| `mail_servers` | list of mail server configs |
+| `mail_servers` | list of mail server configs (name, type, mode, emails/domains) |
 | `import_prefix` | 9router import name prefix |
 | `router_mode` | `local` or `remote` |
 | `router` | per-mode router config (base_url, auth, password, remote_db) |
-| `proxy` | proxy config (enabled, mode, proxy_order, etc.) |
+| `proxy` | proxy config (enabled, mode, proxy_order, protected, current, etc.) |
 | `dot_trick` | dot trick toggle |
+| `email_prefix` | prefix for generated emails |
+| `account_password` | password for created accounts |
+| `batch_count` / `batch_delay` | batch create settings |
+
+### Data files
+| File | Description |
+|------|-------------|
+| `data/keys.txt` | account records: `email\|password\|api_key\|status` |
+| `data/used.txt` | used email addresses |
+| `data/imported.txt` | imported key hashes (local cache) |
+| `data/key-checks.json` | key health cache (fingerprint + state) |
+| `proxy/proxy.txt` | proxy list (scheme://user:pass@host:port) |
+| `proxy/proxy-usage.json` | proxy usage counts |
 
 ---
 
@@ -273,11 +335,12 @@ See `config.json.example` for the template.
 - **Audio captcha solver** — solves reCAPTCHA via audio (Webshare/Google)
 - **QR to terminal** — prints scannable QR as ASCII (half-block)
 - **Cross-origin captcha frames** — Page.createIsolatedWorld (not contentDocument)
-- **Proxy management** — check, rotate, smart-pick, protect
+- **Proxy management** — check (cached), rotate, smart-pick, protect, manual override
 - **9router import** — batch, DB-authoritative dedup, name anti-conflict
-- **CloudMail + MailG** — mail server integration
+- **CloudMail + MailG** — mail server integration, verification email reading
 - **Key health cache** — persistent key-checks.json, fingerprint invalidation
 - **Clear-based UI** — terminal-native (no alt-screen buffer)
+- **Automatic email verification** — reads verification emails, clicks links
 
 ---
 
