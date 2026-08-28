@@ -2296,12 +2296,37 @@ def _verify_tempmail(pm, email, provider_hint=None):
     return False
 
 
+def _efm_python():
+    """Find a python interpreter that has camoufox (needed by enable_free_models.py).
+    Prefer the current interpreter if it has it, else scan common paths."""
+    import shutil as _sh
+    try:
+        import camoufox  # noqa
+        return sys.executable
+    except Exception:
+        pass
+    for py in ["/usr/local/lib/hermes-agent/venv/bin/python3", "/usr/bin/python3", "python3"]:
+        try:
+            p = _sh.which(py) or py
+            import subprocess as _sp
+            r = _sp.run([p, "-c", "import camoufox"], capture_output=True, text=True, timeout=15)
+            if r.returncode == 0:
+                return p
+        except Exception:
+            continue
+    return sys.executable
+
+
 def enable_free_models_for(email, password, api_key):
     """Enable free models for one account via the free-model script."""
+    _EFM = BASE / "tools" / "enable_free_models.py"
+    _MOD = str(BASE / "tools")
+    _GROK = str(BASE / "config")
     # 1. quick API check — already free?
     try:
         import sys as _sys
-        _sys.path.insert(0, str(BASE))
+        _sys.path.insert(0, _MOD)
+        _sys.path.insert(0, _GROK)
         import enable_free_models as efm
         ok, _det = efm.free_model_ok(api_key)
         if ok:
@@ -2310,12 +2335,19 @@ def enable_free_models_for(email, password, api_key):
         pass
     # 2. run the script for this one account (handles Camoufox login + consent)
     try:
+        import os as _os
+        _py = _efm_python()
+        _env = dict(_os.environ)
+        _env["PYTHONPATH"] = _GROK + os.pathsep + _MOD + os.pathsep + _env.get("PYTHONPATH", "")
         r = subprocess.run(
-            [sys.executable, str(BASE / "enable_free_models.py"), "--email", email, "--file", str(KEYS_FILE)],
-            capture_output=True, text=True, timeout=180)
+            [_py, str(_EFM), "--email", email, "--file", str(KEYS_FILE)],
+            capture_output=True, text=True, timeout=240, env=_env)
         out = (r.stdout or "") + (r.stderr or "")
         # success if the account's free model now reports OK
         try:
+            import sys as _sys
+            _sys.path.insert(0, _MOD)
+            _sys.path.insert(0, _GROK)
             import enable_free_models as efm
             ok2, _ = efm.free_model_ok(api_key)
             return ok2
@@ -2696,7 +2728,7 @@ def menu_tokens():
             choices = [(rec["email"], rec["email"], rec.get("api_key", "")[:20]) for rec in view]
             chosen = pick_multi("Select account(s) to delete (Space to multi)", choices, searchable=True)
             if chosen:
-                emails = [e[0] for e in chosen]
+                emails = list(chosen)
                 # sanity: never proceed if we somehow selected 0 or ALL records (guard against wipe)
                 if not emails:
                     log("No account selected — nothing deleted", "warn")
@@ -2734,7 +2766,7 @@ def menu_tokens():
             choices = [(rec["email"], rec["email"], rec.get("api_key", "")[:20]) for rec in view]
             chosen = pick_multi("Select account(s) to view keys (Space to multi)", choices)
             if chosen:
-                for email in [e[0] for e in chosen]:
+                for email in list(chosen):
                     rec = next((x for x in keys if x.get("email") == email), None)
                     if rec and rec.get("api_key"):
                         print("\n  " + W + BD + "API KEY (" + email + "):" + RS)
