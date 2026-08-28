@@ -934,7 +934,11 @@ def create_cloudmail_inbox(email, password="test123"):
                               json={"email": email, "password": password},
                               headers={"Authorization": _cm_token, **hdr}, timeout=15)
                 resp = r2.json()
-                return resp.get("code") == 200
+                code = resp.get("code")
+                # code 200 = created, code 501 = already registered (treat as success)
+                if code in (200, 501):
+                    return True
+                return False
             except Exception as e:
                 last_err = e
                 auth_err = "401" in str(e) or "token" in str(e).lower() or "login failed" in str(e)
@@ -2599,7 +2603,7 @@ def menu_tokens():
                 log("No records to delete", "warn")
                 continue
             choices = [(rec["email"], rec["email"], rec.get("api_key", "")[:20]) for rec in view]
-            chosen = pick_multi("Select account(s) to delete (Space to multi)", choices)
+            chosen = pick_multi("Select account(s) to delete (Space to multi)", choices, searchable=True)
             if chosen:
                 emails = [e[0] for e in chosen]
                 # sanity: never proceed if we somehow selected 0 or ALL records (guard against wipe)
@@ -2724,6 +2728,12 @@ def menu_mail_servers(c):
         print(box_top(w))
         print(box_title(w, "MAIL SERVERS (" + str(total) + ") · F=SEARCH"))
         print(box_mid(w))
+        _use_tmp = c.get("proxy", {}).get("use_public_tempmail", False)
+        _tmp_row = 1 if _use_tmp else 0
+        _total = total + _tmp_row
+        if _use_tmp:
+            # virtual "Public Tempmail" entry
+            print(box_row(w, f"{' ' if _total else ''} {DI}Public Tempmail{RS} {M}T{RS} {DI}free mail.tm{RS}"))
         if servers:
             end = min(scroll + win_sz, total)
             for i, s in enumerate(servers[scroll:end], scroll + 1):
