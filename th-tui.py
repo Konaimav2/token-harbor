@@ -1152,7 +1152,8 @@ def read_cloudmail_inbox(email):
     import requests as _rq
     try:
         hdr = {"Content-Type": "application/json", "User-Agent": _UA, "Referer": CM_BASE + "/"}
-        r = _rq.post(CM_BASE + "/api/login",
+        # /public/* routes need the PUBLIC_KEY (from genToken with admin), NOT the login JWT
+        r = _rq.post(CM_BASE + "/api/public/genToken",
                      json={"email": CM_ADMIN_EMAIL, "password": CM_ADMIN_PASSWORD},
                      headers=hdr, timeout=15)
         tok = r.json().get("data", {}).get("token", "")
