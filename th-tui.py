@@ -2010,27 +2010,56 @@ def _token_filter_counts(keys, checks):
 
 def _test_key(key, model="deepseek-v4-flash:free"):
     """Test an API key — checks /v1/models AND tries a real :free chat completion.
-    Returns (bool, reason_str)."""
+    If a relay (.vercel.app) proxy exists in the pool, route through it (x-relay-target)."""
     import requests
+    relay = _get_relay_proxy()
+    target = "https://tokenharbor.ai"
+    req_kw = {"timeout": 20}
+    if relay:
+        req_kw["url"] = relay + "/v1/models"
+        req_kw["headers"] = {"Authorization": f"Bearer {key}", "x-relay-target": target}
+    else:
+        req_kw["url"] = target + "/v1/models"
+        req_kw["headers"] = {"Authorization": f"Bearer {key}"}
     # 1. models list
     try:
-        r = requests.get("https://tokenharbor.ai/v1/models",
-                         headers={"Authorization": f"Bearer {key}"}, timeout=12)
+        r = requests.get(**req_kw)
         if r.status_code != 200:
             return False, f"models={r.status_code}"
     except Exception as e:
         return False, f"models_err={str(e)[:30]}"
     # 2. actual :free chat completion
     try:
-        r = requests.post("https://tokenharbor.ai/v1/chat/completions",
-                          headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                          json={"model": model, "messages": [{"role": "user", "content": "hi"}],
-                                "max_tokens": 5}, timeout=20)
+        if relay:
+            r = requests.post(relay + "/v1/chat/completions",
+                              headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                                       "x-relay-target": target},
+                              json={"model": model, "messages": [{"role": "user", "content": "hi"}],
+                                    "max_tokens": 5}, timeout=20)
+        else:
+            r = requests.post(target + "/v1/chat/completions",
+                              headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                              json={"model": model, "messages": [{"role": "user", "content": "hi"}],
+                                    "max_tokens": 5}, timeout=20)
         if r.status_code == 200:
             return True, "ok"
         return False, f"completions={r.status_code}:{r.text[:50]}"
     except Exception as e:
         return False, f"completions_err={str(e)[:30]}"
+
+
+def _get_relay_proxy():
+    """Return relay proxy URL (host) from proxy pool if present, else None."""
+    try:
+        pm = _load_proxy_mod()
+        if not pm:
+            return None
+        for p in pm.load_proxies():
+            if p[0] == "relay" and len(p) > 1 and isinstance(p[1], str) and p[1].startswith("http"):
+                return p[1]
+    except Exception:
+        pass
+    return None
 
 
 def fetch_provider_nodes(cfg):

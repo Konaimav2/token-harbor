@@ -42,6 +42,9 @@ def parse_proxy(raw):
     raw = raw.strip()
     if not raw or raw.startswith("#"):
         return None
+    # Relay proxy: https://<anything>.vercel.app (or any https URL w/ x-relay-target)
+    if re.match(r"^https?://[^\s]+$", raw) and "vercel.app" in raw.lower():
+        return "relay", raw.rstrip("/"), 443, None, None
     # standard format: proto://user:pass@host:port
     m = PROXY_RE.match(raw)
     if m:
@@ -287,6 +290,16 @@ def check_proxy(parsed, timeout=8):
     import time
     import requests as rq
     proto, host, port, user, pw = parsed
+    # relay proxy: health = relay responds to a direct ping
+    if proto == "relay":
+        t0 = time.time()
+        try:
+            r = rq.get(host, timeout=timeout, headers={"User-Agent": random.choice(USER_AGENTS)})
+            if r.status_code == 400:  # relay replies 400 when x-relay-target missing — it's alive
+                return int((time.time() - t0) * 1000), "relay", ""
+            return None
+        except Exception:
+            return None
     if proto not in ("http", "https", "socks5"):
         return None
     t0 = time.time()
