@@ -827,8 +827,11 @@ def get_mailg_accounts():
 
 
 def get_cloudmail_addresses():
-    """Get existing cloudmail inboxes from credentials file AND from cloudmail admin API."""
+    """Get existing cloudmail inboxes from credentials file AND from cloudmail admin API.
+    Uses /api/login (admin JWT) + /api/user/list to enumerate existing inboxes.
+    Uses requests (not urllib) to avoid Cloudflare UA/TLS blocking."""
     from glob import glob
+    import requests as _rq
     em = []
     # 1. from credentials file
     try:
@@ -840,43 +843,44 @@ def get_cloudmail_addresses():
                     em.append(p[0].strip())
     except Exception as e:
         elog(f"cloudmail addresses (file): {e}")
-    # 2. from cloudmail admin API (list all known inboxes using wildcard)
-    try:
-        log("Fetching cloudmail inboxes...", "info")
-        req = urllib.request.Request(CM_BASE + "/api/public/genToken",
-            data=json.dumps({"email": CM_ADMIN_EMAIL, "password": CM_ADMIN_PASSWORD}).encode(),
-            headers=_cm_headers({"Content-Type": "application/json"}))
-        with urllib.request.urlopen(req, timeout=10) as r:
-            tok = json.loads(r.read())["data"]["token"]
-        # Use wildcard to get all inboxes
-        req2 = urllib.request.Request(CM_BASE + "/api/public/emailList",
-            data=json.dumps({"toEmail": "*@*"}).encode(),
-            headers=_cm_headers({"Content-Type": "application/json", "Authorization": tok}))
-        with urllib.request.urlopen(req2, timeout=10) as r2:
-            data = json.loads(r2.read()).get("data", [])
-            # Extract unique emails from inbox data
-            for item in data:
-                e = item.get("toEmail", item.get("email", ""))
-                if e and "@" in e:
-                    em.append(e)
-    except Exception as e:
-        elog(f"cloudmail addresses (api): {e}")
+    # 2. from cloudmail admin API (list all known inboxes via /user/list)
+    if CM_BASE and CM_ADMIN_EMAIL and CM_ADMIN_PASSWORD:
+        try:
+            log("Fetching cloudmail inboxes...", "info")
+            hdr = {"Content-Type": "application/json", "User-Agent": _UA, "Referer": CM_BASE + "/"}
+            r = _rq.post(CM_BASE + "/api/login",
+                         json={"email": CM_ADMIN_EMAIL, "password": CM_ADMIN_PASSWORD},
+                         headers=hdr, timeout=15)
+            tok = r.json().get("data", {}).get("token", "")
+            if tok:
+                r2 = _rq.get(CM_BASE + "/api/user/list?num=1&size=500",
+                             headers={"Authorization": tok, "User-Agent": _UA, "Referer": CM_BASE + "/"},
+                             timeout=15)
+                data = r2.json().get("data", {})
+                for u in (data.get("list") or []):
+                    e = u.get("email", "")
+                    if e and "@" in e:
+                        em.append(e)
+        except Exception as e:
+            elog(f"cloudmail addresses (api): {e}")
     return sorted(set(em))
 
 
 def get_cloudmail_domains():
     """Fetch the real, currently-deployed cloudmail domains from the worker API."""
     # 1. live API: /api/setting/websiteConfig returns domainList (public, no auth)
-    try:
-        req = urllib.request.Request(CM_BASE + "/api/setting/websiteConfig", headers=_cm_headers())
-        with urllib.request.urlopen(req, timeout=10) as r:
-            dl = json.loads(r.read()).get("data", {}).get("domainList", [])
-        if dl:
-            clean = [d.lstrip("@") for d in dl if d]
-            if clean:
-                return sorted(clean)
-    except Exception:
-        pass
+    if CM_BASE:
+        try:
+            import requests as _rq
+            r = _rq.get(CM_BASE + "/api/setting/websiteConfig",
+                        headers={"User-Agent": _UA, "Referer": CM_BASE + "/"}, timeout=10)
+            dl = r.json().get("data", {}).get("domainList", [])
+            if dl:
+                clean = [d.lstrip("@") for d in dl if d]
+                if clean:
+                    return sorted(clean)
+        except Exception:
+            pass
     # 2. config file
     try:
         c = load_cfg()
@@ -909,7 +913,7 @@ def get_server_emails(server):
 
 def create_cloudmail_inbox(email, password="test123"):
     """Create a cloudmail inbox. Thread-safe, throttled, with one safe token refresh."""
-    import urllib.request
+    import requests as _rq
     global _cm_token
     # IMPORTANT: never recursively call this function while holding _cm_token_lock;
     # threading.Lock is non-reentrant and that used to deadlock forever on a 401.
@@ -917,22 +921,23 @@ def create_cloudmail_inbox(email, password="test123"):
         last_err = None
         for attempt in range(2):
             try:
-                if not _cm_token:
-                    req = urllib.request.Request(CM_BASE + "/api/public/genToken",
-                        data=json.dumps({"email": CM_ADMIN_EMAIL, "password": CM_ADMIN_PASSWORD}).encode(),
-                        headers=_cm_headers({"Content-Type": "application/json"}))
-                    with urllib.request.urlopen(req, timeout=10) as r:
-                        _cm_token = json.loads(r.read())["data"]["token"]
                 _cm_throttle()
-                req2 = urllib.request.Request(CM_BASE + "/api/public/addUser",
-                    data=json.dumps({"list": [{"email": email, "password": password}]}).encode(),
-                    headers=_cm_headers({"Content-Type": "application/json", "Authorization": _cm_token}))
-                with urllib.request.urlopen(req2, timeout=15) as r2:
-                    resp = json.loads(r2.read())
-                    return resp.get("code") == 200
+                hdr = {"Content-Type": "application/json", "User-Agent": _UA, "Referer": CM_BASE + "/"}
+                if not _cm_token:
+                    r = _rq.post(CM_BASE + "/api/login",
+                                 json={"email": CM_ADMIN_EMAIL, "password": CM_ADMIN_PASSWORD},
+                                 headers=hdr, timeout=15)
+                    _cm_token = r.json().get("data", {}).get("token", "")
+                    if not _cm_token:
+                        raise RuntimeError("login failed")
+                r2 = _rq.post(CM_BASE + "/api/account/add",
+                              json={"email": email, "password": password},
+                              headers={"Authorization": _cm_token, **hdr}, timeout=15)
+                resp = r2.json()
+                return resp.get("code") == 200
             except Exception as e:
                 last_err = e
-                auth_err = "401" in str(e) or "token" in str(e).lower()
+                auth_err = "401" in str(e) or "token" in str(e).lower() or "login failed" in str(e)
                 if attempt == 0 and auth_err:
                     _cm_token = None
                     continue
@@ -1140,19 +1145,19 @@ def read_mailg_inbox(email):
 
 
 def read_cloudmail_inbox(email):
-    import urllib.request
+    import requests as _rq
     try:
-        req = urllib.request.Request(CM_BASE + "/api/public/genToken",
-                                     data=json.dumps({"email": CM_ADMIN_EMAIL, "password": CM_ADMIN_PASSWORD}).encode(),
-                                     headers=_cm_headers({"Content-Type": "application/json"}))
-        with urllib.request.urlopen(req, timeout=10) as r:
-            tok = json.loads(r.read())["data"]["token"]
-        req2 = urllib.request.Request(CM_BASE + "/api/public/emailList",
-                                      data=json.dumps({"toEmail": email}).encode(),
-                                      headers=_cm_headers({"Content-Type": "application/json", "Authorization": tok}))
-        with urllib.request.urlopen(req2, timeout=10) as r2:
-            msgs = json.loads(r2.read()).get("data", [])
-        return sorted(msgs, key=lambda m: m.get("time", m.get("createTime", 0)), reverse=True)
+        hdr = {"Content-Type": "application/json", "User-Agent": _UA, "Referer": CM_BASE + "/"}
+        r = _rq.post(CM_BASE + "/api/login",
+                     json={"email": CM_ADMIN_EMAIL, "password": CM_ADMIN_PASSWORD},
+                     headers=hdr, timeout=15)
+        tok = r.json().get("data", {}).get("token", "")
+        # emailList public endpoint returns messages for the address
+        r2 = _rq.post(CM_BASE + "/api/public/emailList",
+                      json={"toEmail": email, "size": 20},
+                      headers={"Authorization": tok, **hdr}, timeout=15)
+        msgs = r2.json().get("data", [])
+        return sorted(msgs, key=lambda m: m.get("createTime", m.get("time", 0)), reverse=True)
     except Exception as e:
         elog(f"cloudmail read {email}: {e}", traceback.format_exc()[:200])
         return []
@@ -2594,22 +2599,19 @@ def menu_tokens():
                 log("No records to delete", "warn")
                 continue
             choices = [(rec["email"], rec["email"], rec.get("api_key", "")[:20]) for rec in view]
-            chosen = pick_one("Select account to delete", choices)
+            chosen = pick_multi("Select account(s) to delete (Space to multi)", choices)
             if chosen:
-                email = chosen[0]
-                # confirm
-                if raw_input(f"  Delete {email}? (y/N): ").strip().lower() == "y":
-                    # remove from keys.txt
+                emails = [e[0] for e in chosen]
+                if raw_input(f"  Delete {len(emails)} account(s)? (y/N): ").strip().lower() == "y":
                     lines = KEYS_FILE.read_text().splitlines()
-                    kept = [l for l in lines if email not in l]
+                    kept = [l for l in lines if not any(email in l for email in emails)]
                     KEYS_FILE.write_text("\n".join(kept) + "\n")
-                    # remove from checks
-                    if email in checks:
-                        del checks[email]
-                        save_key_checks(checks)
-                    # reload
+                    for email in emails:
+                        if email in checks:
+                            del checks[email]
+                    save_key_checks(checks)
                     keys = load_keys()
-                    log(f"Deleted {email}", "ok")
+                    log(f"Deleted {len(emails)} account(s)", "ok")
                     scroll = 0
         elif k in ('v', 'V'):
             # View FULL key for an account (copyable)
@@ -2617,18 +2619,14 @@ def menu_tokens():
                 log("No records", "warn")
                 continue
             choices = [(rec["email"], rec["email"], rec.get("api_key", "")[:20]) for rec in view]
-            chosen = pick_one("Select account to view key", choices)
+            chosen = pick_multi("Select account(s) to view keys (Space to multi)", choices)
             if chosen:
-                email = chosen[0]
-                rec = next((x for x in keys if x.get("email") == email), None)
-                if rec and rec.get("api_key"):
-                    print("\n  " + W + BD + "API KEY:" + RS)
-                    print("  " + Y + rec["api_key"] + RS)
-                    print("  " + DI + "Email: " + rec.get("email", "") + RS)
-                    raw_input("  " + DI + "Press Enter to copy & continue..." + RS)
-                else:
-                    log(f"No API key for {email}", "warn")
-                    raw_input("  " + DI + "Press Enter" + RS)
+                for email in [e[0] for e in chosen]:
+                    rec = next((x for x in keys if x.get("email") == email), None)
+                    if rec and rec.get("api_key"):
+                        print("\n  " + W + BD + "API KEY (" + email + "):" + RS)
+                        print("  " + Y + rec["api_key"] + RS)
+                raw_input("  " + DI + "Press Enter to continue..." + RS)
         elif k in ('c', 'C'):
             # Check a specific account's key
             if not view:
@@ -2955,6 +2953,13 @@ def menu_mail_servers(c):
                     log("No existing emails found for this server — it will use all available on create", "warn")
                     s.pop("emails", None)
             save_cfg(c)
+        elif k == 'u' or k == 'U':
+            pcfg = c.get("proxy", {})
+            pcfg["use_public_tempmail"] = not pcfg.get("use_public_tempmail", False)
+            c["proxy"] = pcfg
+            save_cfg(c)
+            log("Public tempmail " + ("ON" if pcfg["use_public_tempmail"] else "OFF"), "ok")
+            raw_input("  " + DI + "Press Enter" + RS)
         else:
             # number key → set active
             try:
