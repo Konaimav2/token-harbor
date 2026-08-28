@@ -2829,7 +2829,7 @@ def menu_import():
     log("Importing " + str(len(valid)) + " keys to " + rname + " (" + ptype[0] + ") prefix='" + c.get("import_prefix", "Harbor") + "'...", "arr")
     # Batch import all at once (single subprocess — no duplicate connections)
     keys_list = [f"{k['email']}|{k['password']}|{k['api_key']}|ok" for k in valid]
-    imp_router(None, c, ptype[0], force=force, prefix=c.get("import_prefix", "Harbor"), keys_list=keys_list)
+    imp_router(None, c, ptype[0], force=force, prefix=c.get("import_prefix", "Harbor"))
     raw_input("  " + DI + "Press Enter to continue..." + RS)
 
 
