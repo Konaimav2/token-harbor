@@ -2351,7 +2351,8 @@ def menu_create():
                 raw_input("  " + DI + "Press Enter" + RS)
                 return
             for email in sel:
-                run_full_flow(c, email)
+                # inbox already exists (picked from list) — skip inbox creation
+                run_full_flow(c, email, skip_inbox=True)
         elif choice[0] == "new":
             domains = get_cloudmail_domains()
             items = [(d, d, "") for d in domains]
