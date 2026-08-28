@@ -1452,8 +1452,14 @@ def _ensure_deps(feature, auto=True):
     return False
 
 
+_LOCAL_PROXY_READY = False
+
 def _ensure_local_proxy():
-    """Ensure the bundled proxy-controller is running (start if not). Returns True if up."""
+    """Ensure the bundled proxy-controller is running (start if not). Returns True if up.
+    Caches readiness so we only wait for tunnels once, not on every proxy pick."""
+    global _LOCAL_PROXY_READY
+    if _LOCAL_PROXY_READY:
+        return True
     start_script = BASE / "proxy-controller" / "start.sh"
     if not start_script.exists():
         return False
@@ -1474,6 +1480,7 @@ def _ensure_local_proxy():
                     capture_output=True, text=True, timeout=7)
                 if r.returncode == 0 and r.stdout.strip() and r.stdout.strip().count('.') == 3:
                     log("Proxy-controller ready (" + r.stdout.strip() + ")", "ok")
+                    _LOCAL_PROXY_READY = True
                     return True
             except Exception:
                 pass
@@ -1492,14 +1499,16 @@ def _next_proxy(c, last=None):
         return None
     cfg = c.get("proxy", {})
     mode = cfg.get("mode", "list")
+    _order = cfg.get("proxy_order", "top")
     if mode in ("combo", "list"):
-        # ensure local proxy-controller is up if the list/combo references it
+        # ensure local proxy-controller is up only when balancing (least) needs it
         proxies = pm.load_proxies()
         uses_local = any(p[0] in ("socks5", "http") and p[1] in ("127.0.0.1", "localhost") for p in proxies)
-        if uses_local or mode == "combo":
+        if uses_local and _order == "least":
             _ensure_local_proxy()
-    if mode == "combo":
-        # combo: try local proxy-controller first, fall back to list
+    order = cfg.get("proxy_order", "top")
+    if mode == "combo" and order == "least":
+        # combo with least-used: try local proxy-controller first, fall back to list
         try:
             import subprocess
             r = subprocess.run(["curl", "-s", "-x",
@@ -1514,16 +1523,26 @@ def _next_proxy(c, last=None):
     if mode == "vpngate":
         p = pm.vpngate_proxy()
         return p
-    # smart balancing (like mailg): pick least-used fresh proxy with a distinct IP
+    # honor proxy_order config: top / random / least-used
+    order = cfg.get("proxy_order", "top")
+    proxies = pm.load_proxies()
+    if not proxies:
+        return None
     used_ips = set(c.get("_used_proxy_ips", []))
-    p, ip = pm.smart_pick_proxy(pm.load_proxies(), used_ips=used_ips)
+    if order == "random":
+        p = random.choice(proxies)
+        ip = pm.proxy_ip(p) if hasattr(pm, "proxy_ip") else (p[1] if len(p) > 1 else "?")
+    elif order == "least":
+        p, ip = pm.smart_pick_proxy(proxies, used_ips=used_ips)
+    else:  # top
+        p = proxies[0]
+        ip = pm.proxy_ip(p) if hasattr(pm, "proxy_ip") else (p[1] if len(p) > 1 else "?")
     if p:
-        # remember the IP used this session so we don't reuse it
-        c["_used_proxy_ips"] = list(used_ips) + [ip]
-        # log proxy + resolved IP for transparency
+        if ip and ip != "?":
+            c["_used_proxy_ips"] = list(used_ips) + [ip]
         _host = p[1] if len(p) > 1 else "?"
         _port = p[2] if len(p) > 2 else "?"
-        log(f"Using proxy: {_host}:{_port} (IP: {ip})", "info")
+        log(f"Using proxy: {_host}:{_port} (IP: {ip}, order={order})", "info")
         return p
     return None
 
