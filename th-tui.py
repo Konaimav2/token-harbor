@@ -1561,7 +1561,9 @@ def _next_proxy(c, last=None):
     import itertools
     for p in cands[:min(30, len(cands))]:
         try:
-            res = pm.check_proxy(p, timeout=8)
+            # use cached check result (from proxy-menu C=Check) when fresh —
+            # overrides the auto live-check on every use
+            res = pm.cached_check_proxy(p, timeout=8) if hasattr(pm, "cached_check_proxy") else pm.check_proxy(p, timeout=8)
         except Exception:
             res = None
         if not res:
@@ -3431,6 +3433,19 @@ def menu_proxy(c):
                     _r = pm.check_proxy(_p, timeout=timeout)
                     _h = _p[1] if len(_p) > 1 else "?"
                     _pt = _p[2] if len(_p) > 2 else "?"
+                    # populate the check cache so _next_proxy can reuse (override auto-check)
+                    if hasattr(pm, "load_check_cache"):
+                        import time as _tt
+                        _cache = pm.load_check_cache()
+                        _key = f"{_p[0]}|{_p[1]}|{_p[2]}|{_p[3] or ''}"
+                        _cache[_key] = {
+                            "alive": _r is not None,
+                            "ip": _r[1] if _r else "",
+                            "latency": _r[0] if _r else 0,
+                            "region": _r[2] if _r and len(_r) > 2 else "",
+                            "ts": _tt.time(),
+                        }
+                        pm.save_check_cache(_cache)
                     if _r:
                         _rg = _r[2] if len(_r) > 2 else ""
                         return (_p, _r[0], _r[1] or _h, _h, _pt, _rg)

@@ -412,8 +412,50 @@ def get_live_proxy():
 
 # ── smart balancing (like mailg) ──
 import json as _json
-from pathlib import Path as _Path
 PROXY_USE_FILE = Path(__file__).resolve().parent / "proxy-usage.json"
+PROXY_CHECK_CACHE_FILE = Path(__file__).resolve().parent / "proxy-check-cache.json"
+
+
+def load_check_cache():
+    """Load cached proxy check results -> {key: {alive: bool, ip: str, ts: float}}."""
+    try:
+        if PROXY_CHECK_CACHE_FILE.exists():
+            return _json.loads(PROXY_CHECK_CACHE_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+
+def save_check_cache(cache):
+    try:
+        PROXY_CHECK_CACHE_FILE.write_text(_json.dumps(cache))
+    except Exception:
+        pass
+
+
+def cached_check_proxy(parsed, timeout=8, cache_ttl=3600):
+    """Like check_proxy but uses the cache (from the proxy-menu C=Check command)
+    when fresh, to override the auto live-check on every use."""
+    cache = load_check_cache()
+    key = _proxy_key(parsed)
+    import time as _t
+    ent = cache.get(key)
+    if ent and (_t.time() - ent.get("ts", 0)) < cache_ttl:
+        if ent.get("alive"):
+            return ent.get("latency", 0), ent.get("ip", ""), ent.get("region", "")
+        return None
+    # cache miss/expired — do a real check
+    res = check_proxy(parsed, timeout=timeout)
+    cache[key] = {
+        "alive": res is not None,
+        "ip": res[1] if res else "",
+        "latency": res[0] if res else 0,
+        "region": res[2] if res and len(res) > 2 else "",
+        "ts": _t.time(),
+    }
+    save_check_cache(cache)
+    return res
+
 
 
 def _proxy_key(p):
