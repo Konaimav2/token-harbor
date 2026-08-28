@@ -1523,6 +1523,22 @@ def _next_proxy(c, last=None):
     if mode == "vpngate":
         p = pm.vpngate_proxy()
         return p
+    # MANUAL OVERRIDE: if proxy.current is set (user locked a proxy), use it
+    # directly WITHOUT the auto liveness check — manual wins over checked status.
+    manual = cfg.get("current")
+    if manual:
+        # manual may be a parsed tuple or a "host:port" / "scheme://user:pass@host:port" string
+        p = manual
+        if isinstance(manual, str):
+            try:
+                p = pm.parse_proxy(manual) if hasattr(pm, "parse_proxy") else _parse_manual_proxy(manual)
+            except Exception:
+                p = None
+        if p:
+            _host = p[1] if len(p) > 1 else "?"
+            _port = p[2] if len(p) > 2 else "?"
+            log(f"Using MANUAL proxy (override): {_host}:{_port}", "ok")
+            return p
     # honor proxy_order config: top / random / least-used
     order = cfg.get("proxy_order", "top")
     proxies = pm.load_proxies()
@@ -1560,6 +1576,38 @@ def _next_proxy(c, last=None):
         return p
     log("No live proxy found in pool", "warn")
     return None
+
+
+
+def _parse_manual_proxy(s):
+    """Parse a manual proxy string: scheme://user:pass@host:port or host:port."""
+    import re as _re
+    s = s.strip()
+    scheme = "http"
+    user = ""
+    pw = ""
+    host = s
+    port = None
+    m = _re.match(r"^(https?|socks4|socks5)://(.*)$", s, _re.I)
+    if m:
+        scheme = m.group(1).lower()
+        rest = m.group(2)
+    else:
+        rest = s
+    if "@" in rest:
+        cred, host = rest.rsplit("@", 1)
+        if ":" in cred:
+            user, pw = cred.split(":", 1)
+        else:
+            user = cred
+    if ":" in host:
+        hp = host.rsplit(":", 1)
+        if hp[1].isdigit():
+            host = hp[0]
+            port = int(hp[1])
+    if port is None:
+        port = 443 if scheme in ("https",) else 80
+    return (scheme, host, port, user, pw)
 
 
 def _solve_captcha(pg, c, timeout=180):
@@ -3246,9 +3294,12 @@ def menu_proxy(c):
         print(box_row(w, f"{Y}S.{RS} {W}Scrape fresh{RS}   {DI}set count, pull from lists{RS}"))
         print(box_row(w, f"{Y}L.{RS} {W}Add local proxy{RS} {DI}proxy-controller :7920/:8118{RS}"))
         print(box_row(w, f"{Y}R.{RS} {W}Run proxy-ctrl{RS}  {DI}start/stop bundled :7920/:8118{RS}"))
+        _mcur = pcfg.get("current")
+        _mdisp = (_mcur if isinstance(_mcur, str) else (f"{_mcur[1]}:{_mcur[2]}" if _mcur else "none"))
+        print(box_row(w, f"{Y}M.{RS} {W}Manual proxy{RS}    {DI}{_mdisp} (override auto-check){RS}"))
         print(box_row(w, f"{Y}B.{RS} {W}Back{RS}"))
         print(box_bot(w))
-        print_hint(f"{DI}1-4 toggle · A=Add F=Search D=Del C=Check S=Scrape L=Local R=Run B=Back{RS}")
+        print_hint(f"{DI}1-4 toggle · A=Add F=Search D=Del C=Check S=Scrape L=Local R=Run M=Manual B=Back{RS}")
         k = get_key()
         if k in ('b', 'B', 'escape', 'ctrl-c'):
             break
@@ -3582,6 +3633,21 @@ def menu_proxy(c):
                 print("  " + (r.stdout or "").replace("\n", "\n  "))
             except Exception as e:
                 elog("run proxy-ctrl: " + str(e))
+            raw_input("  " + DI + "Press Enter" + RS)
+        elif k == 'm' or k == 'M':
+            # MANUAL OVERRIDE: lock a specific proxy (skips auto liveness check)
+            pcfg = c.get("proxy", {})
+            cur = pcfg.get("current")
+            cur_disp = cur if isinstance(cur, str) else (f"{cur[1]}:{cur[2]}" if cur else "none")
+            ans = raw_input(f"  Manual proxy override (current: {cur_disp}, empty=clear, host:port or scheme://user:pass@host:port): ").strip()
+            if not ans:
+                pcfg["current"] = None
+                log("Manual proxy override cleared", "ok")
+            else:
+                pcfg["current"] = ans
+                log("Manual proxy override set: " + ans, "ok")
+            c["proxy"] = pcfg
+            save_cfg(c)
             raw_input("  " + DI + "Press Enter" + RS)
 
 
