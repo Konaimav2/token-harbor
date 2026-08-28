@@ -1529,21 +1529,36 @@ def _next_proxy(c, last=None):
     if not proxies:
         return None
     used_ips = set(c.get("_used_proxy_ips", []))
-    if order == "random":
-        p = random.choice(proxies)
-        ip = pm.proxy_ip(p) if hasattr(pm, "proxy_ip") else (p[1] if len(p) > 1 else "?")
-    elif order == "least":
+    if order == "least":
         p, ip = pm.smart_pick_proxy(proxies, used_ips=used_ips)
-    else:  # top
-        p = proxies[0]
-        ip = pm.proxy_ip(p) if hasattr(pm, "proxy_ip") else (p[1] if len(p) > 1 else "?")
-    if p:
-        if ip and ip != "?":
+        if p:
             c["_used_proxy_ips"] = list(used_ips) + [ip]
+            log(f"Using proxy: {p[1] if len(p)>1 else '?'}:{p[2] if len(p)>2 else '?'} (IP: {ip}, order=least)", "info")
+            return p
+        return None
+    # top / random: iterate candidates, skip dead/failed proxies (verify live)
+    if order == "random":
+        cands = list(proxies)
+        random.shuffle(cands)
+    else:  # top
+        cands = list(proxies)
+    import itertools
+    for p in cands[:min(30, len(cands))]:
+        try:
+            res = pm.check_proxy(p, timeout=8)
+        except Exception:
+            res = None
+        if not res:
+            continue  # dead proxy, try next
+        ip = res[1] if len(res) > 1 else (p[1] if len(p) > 1 else "?")
+        if ip in used_ips:
+            continue
+        c["_used_proxy_ips"] = list(used_ips) + [ip]
         _host = p[1] if len(p) > 1 else "?"
         _port = p[2] if len(p) > 2 else "?"
         log(f"Using proxy: {_host}:{_port} (IP: {ip}, order={order})", "info")
         return p
+    log("No live proxy found in pool", "warn")
     return None
 
 
