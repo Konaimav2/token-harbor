@@ -1793,6 +1793,14 @@ def create_account(c, email=None, password=None, _retry=True):
             # detect dashboard vs landing page vs stall
             on_dashboard = "dashboard" in url or "api-keys" in url or "dashboard" in body or "api-keys" in body
             on_landing = "token harbor" in body and "one harbor" in body and "dashboard" not in body
+            # if page shows "loading", wait for it to finish
+            if on_dashboard and "loading" in body:
+                try:
+                    pg.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    pass
+                body = pg.inner_text("body", timeout=8000).lower()
+                on_dashboard = "dashboard" in url or "api-keys" in url or "dashboard" in body or "api-keys" in body
             if on_dashboard:
                 dlog(f"Account created + dashboard reached for {email}")
                 # robust API key creation: retry modal, fall back to existing key on page
@@ -1848,12 +1856,6 @@ def create_account(c, email=None, password=None, _retry=True):
                 url_now = pg.url
                 elog(f"signup unexpected response for {email}: url={url_now} body={body[:120]}")
                 b.close()
-                # retry with a different proxy (current proxy IP may be registered or page stalled)
-                if _retry and c.get("proxy", {}).get("enabled"):
-                    log(f"Retrying {email} with different proxy...", "warn")
-                    if proxy_parsed and len(proxy_parsed) > 1:
-                        c.setdefault("_used_proxy_ips", []).append(proxy_parsed[1])
-                    return create_account(c, email=email, password=password, _retry=False)
                 return None
     except Exception as e:
         elog(f"create account {email}: {e}", traceback.format_exc()[:200])
