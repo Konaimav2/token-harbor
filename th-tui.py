@@ -1750,12 +1750,12 @@ def create_account(c, email=None, password=None):
             ctx.set_default_timeout(pw_timeout_ms)
             ctx.set_default_navigation_timeout(pw_timeout_ms)
             pg = ctx.new_page()
-            pg.goto("https://tokenharbor.ai/login?mode=signup", wait_until="domcontentloaded", timeout=min(30000, pw_timeout_ms))
+            pg.goto("https://tokenharbor.ai/login?mode=signup", wait_until="domcontentloaded", timeout=min(15000, pw_timeout_ms))
             try:
-                pg.wait_for_load_state("networkidle", timeout=min(15000, pw_timeout_ms))
+                pg.wait_for_load_state("networkidle", timeout=min(10000, pw_timeout_ms))
             except Exception:
                 pass
-            pg.wait_for_selector('input[name="email"]', timeout=min(60000, pw_timeout_ms))
+            pg.wait_for_selector('input[name="email"]', timeout=min(30000, pw_timeout_ms))
             time.sleep(1)
             # humanize: load helpers + human-like fill/click
             try:
@@ -2262,24 +2262,29 @@ def run_full_flow(c, email=None, password=None, pm=None, provider_hint=None, ski
         if not inbox_ok:
             log(f"SKIP {email}: no inbox", "no")
             return None
-    # 1. CREATE (with proxy retry: if the proxy fails, try a fresh one up to 3x)
+    # 1. CREATE (with proxy rotation: fail 3x → rotate proxy → retry same account)
     log(f"Registering {email}...", "arr")
     r = None
-    for attempt in range(1, 4):
+    max_attempts = 12  # up to 4 proxy rotations × 3 tries each
+    proxy_fail_count = 0
+    for attempt in range(1, max_attempts + 1):
         r = create_account(c, email=email, password=password)
         if r:
             dlog(f"Account created for {email}")
             break
-        if attempt < 3:
-            dlog(f"Create attempt {attempt}/3 failed for {email}, retrying with fresh proxy...")
-            time.sleep(3)
-            if c.get("proxy", {}).get("enabled"):
-                # add the FAILED proxy IP to skip it next attempt
-                failed_ip = c.get("_last_proxy_ip")
-                if failed_ip:
-                    c.setdefault("_used_proxy_ips", []).append(failed_ip)
+        proxy_fail_count += 1
+        if proxy_fail_count >= 3:
+            # rotate to next proxy after 3 failures
+            failed_ip = c.get("_last_proxy_ip")
+            if failed_ip:
+                c.setdefault("_used_proxy_ips", []).append(failed_ip)
+                log(f"Proxy failed 3x ({failed_ip}), rotating...", "warn")
+            proxy_fail_count = 0
+        else:
+            dlog(f"Create attempt {attempt}/{max_attempts} failed for {email}, retrying same proxy...")
+        interruptible_sleep(2)
     if not r:
-        log("Failed to create: " + (email or "(no email)"), "no")
+        log("Failed to create after all attempts: " + (email or "(no email)"), "no")
         return None
     log("Created: " + email, "ok")
     pw = r.get("password", password or "")
