@@ -1908,6 +1908,12 @@ def create_account(c, email=None, password=None, _retry=True):
                             on_dashboard = True
                         else:
                             elog(f"signup retry failed: url={url_now} body={body[:120]}")
+                            try:
+                                _shot = f"/tmp/signup_fail_{email.split('@')[0]}.png"
+                                pg.screenshot(path=_shot, full_page=True)
+                                dlog(f"Screenshot saved: {_shot}")
+                            except Exception:
+                                pass
                             b.close()
                             return None
                     except Exception as e:
@@ -1916,6 +1922,12 @@ def create_account(c, email=None, password=None, _retry=True):
                         return None
                 else:
                     elog(f"signup unexpected response for {email}: url={url_now} body={body[:120]}")
+                    try:
+                        _shot = f"/tmp/signup_fail_{email.split('@')[0]}.png"
+                        pg.screenshot(path=_shot, full_page=True)
+                        dlog(f"Screenshot saved: {_shot}")
+                    except Exception:
+                        pass
                     b.close()
                     return None
     except Exception as e:
@@ -2146,19 +2158,38 @@ def _test_key(key, model="deepseek-v4-flash:free"):
             headers["Content-Type"] = "application/json"
             return requests.request(method, url, headers=headers, json=body, proxies=proxies, timeout=20)
         return requests.request(method, url, headers=headers, proxies=proxies, timeout=20)
+
+    def _is_json_resp(r):
+        ct = r.headers.get("content-type", "")
+        return "json" in ct.lower()
+
+    def _err_from(r):
+        try:
+            j = r.json()
+            return j.get("error", {}).get("message", r.text[:60]) if isinstance(j, dict) else r.text[:60]
+        except Exception:
+            return r.text[:60]
     # 1. models list
     try:
         r = _req("GET", "/v1/models")
         if r.status_code != 200:
-            return False, f"models={r.status_code}"
+            return False, f"models={r.status_code}:{_err_from(r)[:60]}"
+        if not _is_json_resp(r):
+            return False, f"models=not_json:{r.text[:20]}"
     except Exception as e:
         return False, f"models_err={str(e)[:30]}"
     # 2. actual :free chat completion
     try:
         r = _req("POST", "/v1/chat/completions", {"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5})
-        if r.status_code == 200:
-            return True, "ok"
-        return False, f"completions={r.status_code}:{r.text[:50]}"
+        if r.status_code == 200 and _is_json_resp(r):
+            try:
+                choices = r.json().get("choices", [])
+                if choices:
+                    return True, "ok"
+                return False, f"completions=no_choices:{r.text[:60]}"
+            except Exception:
+                return False, f"completions=bad_json:{r.text[:60]}"
+        return False, f"completions={r.status_code}:{_err_from(r)[:80]}"
     except Exception as e:
         return False, f"completions_err={str(e)[:30]}"
 
