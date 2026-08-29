@@ -1792,7 +1792,9 @@ def create_account(c, email=None, password=None, _retry=True):
                 pass
             # detect dashboard vs landing page vs stall
             on_dashboard = "dashboard" in url or "api-keys" in url or "dashboard" in body or "api-keys" in body
-            on_landing = "token harbor" in body and "one harbor" in body and "dashboard" not in body
+            # signup page has form + marketing text — NOT a landing page
+            has_form = pg.locator('input[name="email"]').count() > 0
+            on_landing = "token harbor" in body and "one harbor" in body and "dashboard" not in body and not has_form
             # if page shows "loading", wait for it to finish
             if on_dashboard and "loading" in body:
                 try:
