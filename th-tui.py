@@ -1791,20 +1791,26 @@ def create_account(c, email=None, password=None, _retry=True):
             except Exception:
                 pass
             # detect dashboard vs landing page vs stall
-            on_dashboard = "dashboard" in url or "api-keys" in url or "dashboard" in body or "api-keys" in body
+            # SPA: URL may stay /login?mode=signup even after dashboard loads
+            # Check body for dashboard-specific content
+            _dash_signals = ["balance", "overview", "api key", "tokens", "subscription", "enable f"]
+            on_dashboard = "dashboard" in url or "api-keys" in url or "dashboard" in body or "api-keys" in body or any(s in body for s in _dash_signals)
             # signup page has form + marketing text — NOT a landing page
             has_form = pg.locator('input[name="email"]').count() > 0
             # /login?mode=signup is the signup page (has form + marketing text)
             is_signup = "mode=signup" in url or "mode=signin" in url
             on_landing = "token harbor" in body and "one harbor" in body and "dashboard" not in body and not has_form and not is_signup
             # if page shows "loading", wait for it to finish
-            if on_dashboard and "loading" in body:
+            if on_dashboard and ("loading" in body or len(body) < 50):
                 try:
                     pg.wait_for_load_state("networkidle", timeout=15000)
                 except Exception:
                     pass
                 body = pg.inner_text("body", timeout=8000).lower()
-                on_dashboard = "dashboard" in url or "api-keys" in url or "dashboard" in body or "api-keys" in body
+                # SPA: URL may stay /login?mode=signup even after dashboard loads
+            # Check body for dashboard-specific content
+            _dash_signals = ["balance", "overview", "api key", "tokens", "subscription", "enable f"]
+            on_dashboard = "dashboard" in url or "api-keys" in url or "dashboard" in body or "api-keys" in body or any(s in body for s in _dash_signals)
             if on_dashboard:
                 dlog(f"Account created + dashboard reached for {email}")
                 # robust API key creation: retry modal, fall back to existing key on page
