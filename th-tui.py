@@ -1141,24 +1141,7 @@ def build_pw(c):
 
 
 # ---- inbox reading + verify link ----
-def mailg_refresh_inbox(email):
-    """Force Gmail sync for one account via POST /api/accounts/{email}/messages/refresh."""
-    if not MAILG_URL or not MAILG_TOKEN:
-        return
-    import urllib.request
-    try:
-        req = urllib.request.Request(
-            f"{MAILG_URL}/api/accounts/{email}/messages/refresh",
-            method="POST",
-            headers={"Content-Type": "application/json", "Authorization": MAILG_TOKEN})
-        urllib.request.urlopen(req, timeout=20)
-    except Exception:
-        pass  # best-effort refresh
-
-
 def read_mailg_inbox(email):
-    """Read mailg inbox with forced refresh for real-time emails."""
-    mailg_refresh_inbox(email)
     import urllib.request
     try:
         req = urllib.request.Request(MAILG_URL + "/api/public/emailList",
