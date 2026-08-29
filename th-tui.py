@@ -2101,14 +2101,15 @@ def _test_key(key, model="deepseek-v4-flash:free"):
 
 
 def _get_relay_proxy():
-    """Return relay proxy URL (host) from proxy pool if present, else None."""
+    """Return a random relay proxy URL from proxy pool, else None."""
     try:
         pm = _load_proxy_mod()
         if not pm:
             return None
-        for p in pm.load_proxies():
-            if p[0] == "relay" and len(p) > 1 and isinstance(p[1], str) and p[1].startswith("http"):
-                return p[1]
+        relays = [p[1] for p in pm.load_proxies()
+                  if p[0] == "relay" and len(p) > 1 and isinstance(p[1], str) and p[1].startswith("http")]
+        if relays:
+            return random.choice(relays)
     except Exception:
         pass
     return None
