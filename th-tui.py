@@ -1769,15 +1769,20 @@ def create_account(c, email=None, password=None, _retry=True):
                 _hz = _ihu.module_from_spec(_hz_spec); _hz_spec.loader.exec_module(_hz)
             except Exception:
                 _hz = None
-            if _hz:
-                _hz.human_type(pg, pg.locator('input[name="email"]'), email)
-                _hz.human_type(pg, pg.locator('input[name="password"]'), password)
-                _hz.rand_delay(0.4, 1.2)
-                _hz.human_click(pg, pg.locator('button[type="submit"]'))
-            else:
-                pg.fill('input[name="email"]', email)
-                pg.fill('input[name="password"]', password)
-                pg.click('button[type="submit"]', timeout=30000)
+            try:
+                if _hz:
+                    _hz.human_type(pg, pg.locator('input[name="email"]'), email)
+                    _hz.human_type(pg, pg.locator('input[name="password"]'), password)
+                    _hz.rand_delay(0.4, 1.2)
+                    _hz.human_click(pg, pg.locator('button[type="submit"]'))
+                else:
+                    pg.fill('input[name="email"]', email)
+                    pg.fill('input[name="password"]', password)
+                    pg.click('button[type="submit"]', timeout=30000)
+            except Exception as e:
+                elog(f"form fill/submit failed: {str(e)[:80]}")
+                b.close()
+                return None
             # solve Turnstile if present (manual via VNC or headless solver)
             try:
                 _solve_captcha(pg, c, timeout=180)
@@ -1869,7 +1874,9 @@ def create_account(c, email=None, password=None, _retry=True):
                 return None
             elif any(p in body for p in [
                 "couldn't create your account", "try again in a minute",
-                "our team has been alerted",
+                "our team has been alerted", "rate limit", "too many requests",
+                "blacklist", "blocked", "suspicious", "invalid email",
+                "email domain not allowed", "temp email", "disposable",
             ]):
                 log("Backend blocked signup — rotating proxy", "warn")
                 b.close()
