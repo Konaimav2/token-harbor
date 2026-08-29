@@ -1862,13 +1862,18 @@ def create_account(c, email=None, password=None, _retry=True):
                 "has already been registered", "email already registered",
                 "already registered", "email already exists", "already been used",
                 "account with this email already",
-                "couldn't create your account", "try again in a minute",
-                "our team has been alerted",
             ]):
                 log("Email already registered: " + email, "warn")
                 b.close()
                 mark_used(email)  # never pick this address again
                 return None
+            elif any(p in body for p in [
+                "couldn't create your account", "try again in a minute",
+                "our team has been alerted",
+            ]):
+                log("Backend blocked signup — rotating proxy", "warn")
+                b.close()
+                return None  # let run_full_flow retry with different proxy
             else:
                 url_now = pg.url
                 _hf = pg.locator('input[name="email"]').count()
