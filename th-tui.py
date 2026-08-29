@@ -1761,9 +1761,22 @@ def create_account(c, email=None, password=None):
                 _solve_captcha(pg, c, timeout=180)
             except Exception as e:
                 dlog(f"solve captcha: {e}")
-            time.sleep(6)
-            body = pg.inner_text("body", timeout=10000).lower()
-            if "dashboard" in body or "api-keys" in body:
+            # wait for page to settle — check URL + body for dashboard/landing
+            time.sleep(3)
+            try:
+                pg.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                pass
+            url = pg.url.lower()
+            body = ""
+            try:
+                body = pg.inner_text("body", timeout=8000).lower()
+            except Exception:
+                pass
+            # detect dashboard vs landing page vs stall
+            on_dashboard = "dashboard" in url or "api-keys" in url or "dashboard" in body or "api-keys" in body
+            on_landing = "token harbor" in body and "one harbor" in body and "dashboard" not in body
+            if on_dashboard:
                 dlog(f"Account created + dashboard reached for {email}")
                 # robust API key creation: retry modal, fall back to existing key on page
                 api_key = ""
@@ -1815,12 +1828,12 @@ def create_account(c, email=None, password=None):
                 mark_used(email)  # never pick this address again
                 return None
             else:
-                elog(f"signup unexpected response for {email}: {body[:120]}")
+                url_now = pg.url
+                elog(f"signup unexpected response for {email}: url={url_now} body={body[:120]}")
                 b.close()
-                # retry with a different proxy (current proxy IP may be registered)
+                # retry with a different proxy (current proxy IP may be registered or page stalled)
                 if _retry and c.get("proxy", {}).get("enabled"):
                     log(f"Retrying {email} with different proxy...", "warn")
-                    # mark current proxy as used to skip it
                     c.setdefault("_used_proxy_ips", []).append("__retry__")
                     return create_account(email, password, c, headless=headless, _retry=False)
                 return None
