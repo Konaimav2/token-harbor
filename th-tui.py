@@ -1569,6 +1569,9 @@ def _next_proxy(c, last=None):
         cands = list(proxies)
     import itertools
     for p in cands[:min(30, len(cands))]:
+        # relay proxies (https://*.vercel.app) can't be Playwright socket proxies — skip for browser use
+        if p[0] == "relay":
+            continue
         try:
             # use cached check result (from proxy-menu C=Check) when fresh —
             # overrides the auto live-check on every use
@@ -1814,6 +1817,12 @@ def create_account(c, email=None, password=None):
             else:
                 elog(f"signup unexpected response for {email}: {body[:120]}")
                 b.close()
+                # retry with a different proxy (current proxy IP may be registered)
+                if _retry and c.get("proxy", {}).get("enabled"):
+                    log(f"Retrying {email} with different proxy...", "warn")
+                    # mark current proxy as used to skip it
+                    c.setdefault("_used_proxy_ips", []).append("__retry__")
+                    return create_account(email, password, c, headless=headless, _retry=False)
                 return None
     except Exception as e:
         elog(f"create account {email}: {e}", traceback.format_exc()[:200])
@@ -2018,37 +2027,41 @@ def _token_filter_counts(keys, checks):
 
 def _test_key(key, model="deepseek-v4-flash:free"):
     """Test an API key — checks /v1/models AND tries a real :free chat completion.
-    If a relay (.vercel.app) proxy exists in the pool, route through it (x-relay-target)."""
+    Uses relay (.vercel.app) with x-relay-target if available, else socket proxy, else direct."""
     import requests
-    relay = _get_relay_proxy()
     target = "https://tokenharbor.ai"
-    req_kw = {"timeout": 20}
-    if relay:
-        req_kw["url"] = relay + "/v1/models"
-        req_kw["headers"] = {"Authorization": f"Bearer {key}", "x-relay-target": target}
-    else:
-        req_kw["url"] = target + "/v1/models"
-        req_kw["headers"] = {"Authorization": f"Bearer {key}"}
+    relay = _get_relay_proxy()
+    # build proxy kwargs for requests (socket proxies)
+    proxies = None
+    pm = _load_proxy_mod()
+    if not relay and pm:
+        pcfg = load_cfg().get("proxy", {})
+        if pcfg.get("enabled"):
+            try:
+                pp = _next_proxy(load_cfg())
+                if pp and pp[0] in ("http", "socks5"):
+                    proxies = _build_requests_proxy(pp)
+            except Exception:
+                pass
+    def _req(method, path, body=None):
+        url = (relay + path) if relay else (target + path)
+        headers = {"Authorization": f"Bearer {key}"}
+        if relay:
+            headers["x-relay-target"] = target
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+            return requests.request(method, url, headers=headers, json=body, proxies=proxies, timeout=20)
+        return requests.request(method, url, headers=headers, proxies=proxies, timeout=20)
     # 1. models list
     try:
-        r = requests.get(**req_kw)
+        r = _req("GET", "/v1/models")
         if r.status_code != 200:
             return False, f"models={r.status_code}"
     except Exception as e:
         return False, f"models_err={str(e)[:30]}"
     # 2. actual :free chat completion
     try:
-        if relay:
-            r = requests.post(relay + "/v1/chat/completions",
-                              headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
-                                       "x-relay-target": target},
-                              json={"model": model, "messages": [{"role": "user", "content": "hi"}],
-                                    "max_tokens": 5}, timeout=20)
-        else:
-            r = requests.post(target + "/v1/chat/completions",
-                              headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                              json={"model": model, "messages": [{"role": "user", "content": "hi"}],
-                                    "max_tokens": 5}, timeout=20)
+        r = _req("POST", "/v1/chat/completions", {"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5})
         if r.status_code == 200:
             return True, "ok"
         return False, f"completions={r.status_code}:{r.text[:50]}"
@@ -2068,6 +2081,20 @@ def _get_relay_proxy():
     except Exception:
         pass
     return None
+
+
+def _build_requests_proxy(parsed):
+    """Build requests proxy dict from a parsed proxy tuple."""
+    proto, host, port, user, pw = parsed
+    if proto == "socks5":
+        base = f"socks5h://{host}:{port}"
+        if user:
+            base = f"socks5h://{user}:{pw}@{host}:{port}"
+    else:
+        base = f"{proto}://{host}:{port}"
+        if user:
+            base = f"{proto}://{user}:{pw}@{host}:{port}"
+    return {"http": base, "https": base}
 
 
 def fetch_provider_nodes(cfg):
@@ -2605,6 +2632,10 @@ def menu_reverify():
         try:
             ms = get_active_mail(load_cfg())
             mt = ms.get("type", "") if ms else ""
+            # use stored proxy from registration if available
+            stored_proxy = rec.get("proxy", "")
+            if stored_proxy:
+                log(f"Using stored proxy: {stored_proxy}", "info")
             if mt == "mailg":
                 r = verify_via_mailg(email, pw, api_key, retries=8, delay=12)
             elif mt == "cloudmail":
