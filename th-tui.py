@@ -130,6 +130,7 @@ def print_hint(content):
     print("  " + _truncate_ansi(content, maxlen))
 
 
+import signal
 import traceback
 import urllib.request
 import urllib.error
@@ -412,6 +413,13 @@ def _kdump(c, tag):
             _f.write(f"{tag}: {c!r} hex={c.encode('utf-8','replace').hex() if c else 'empty'} at {time.time():.2f}\n")
     except Exception:
         pass
+
+
+def interruptible_sleep(seconds, label=""):
+    """Sleep that can be interrupted by Ctrl+C."""
+    end = time.time() + seconds
+    while time.time() < end:
+        time.sleep(min(1, end - time.time()))
 
 
 def get_key():
@@ -1133,7 +1141,24 @@ def build_pw(c):
 
 
 # ---- inbox reading + verify link ----
+def mailg_refresh_inbox(email):
+    """Force Gmail sync for one account via POST /api/accounts/{email}/messages/refresh."""
+    if not MAILG_URL or not MAILG_TOKEN:
+        return
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            f"{MAILG_URL}/api/accounts/{email}/messages/refresh",
+            method="POST",
+            headers={"Content-Type": "application/json", "Authorization": MAILG_TOKEN})
+        urllib.request.urlopen(req, timeout=20)
+    except Exception:
+        pass  # best-effort refresh
+
+
 def read_mailg_inbox(email):
+    """Read mailg inbox with forced refresh for real-time emails."""
+    mailg_refresh_inbox(email)
     import urllib.request
     try:
         req = urllib.request.Request(MAILG_URL + "/api/public/emailList",
@@ -2554,7 +2579,7 @@ def menu_batch():
             # ratelimit delay between accounts (from tokenharbour-farm: 60/30/15s)
             if i < n - 1 and delay > 0:
                 log(f"Waiting {delay}s to avoid rate-limit...", "info")
-                time.sleep(delay)
+                interruptible_sleep(delay)
     except KeyboardInterrupt:
         print(f"\nBatch interrupted: {len(ok)}/{n} OK")
     else:
@@ -2572,6 +2597,52 @@ def menu_batch():
                     if r.get("api_key"):
                         imp_router(r["api_key"], c, pt)
     raw_input("  " + DI + "Press Enter to continue..." + RS)
+
+
+def menu_reverify():
+    """Re-verify accounts marked UNVER (403)."""
+    keys = load_keys()
+    if not keys:
+        log("No tokens to reverify!", "warn")
+        raw_input("  " + DI + "Press Enter" + RS)
+        return
+    checks = load_key_checks()
+    unver = [k for k in keys if checks.get(k["email"], {}).get("state") == "forbidden"]
+    if not unver:
+        log("No unverified (403) accounts found", "info")
+        raw_input("  " + DI + "Press Enter" + RS)
+        return
+    log(f"Found {len(unver)} unverified accounts", "info")
+    ok = 0
+    for rec in unver:
+        email = rec["email"]
+        pw = rec.get("password", "")
+        api_key = rec.get("api_key", "")
+        log(f"Re-verifying {email}...", "arr")
+        try:
+            ms = get_active_mail(load_cfg())
+            mt = ms.get("type", "") if ms else ""
+            if mt == "mailg":
+                r = verify_via_mailg(email, pw, api_key, retries=8, delay=12)
+            elif mt == "cloudmail":
+                r = verify_via_cloudmail(email, pw, api_key, retries=8, delay=12)
+            else:
+                log(f"Unknown mail type: {mt}", "warn")
+                continue
+            if r:
+                ok += 1
+                log(f"Verified: {email}", "ok")
+            else:
+                log(f"Still unverified: {email}", "warn")
+        except KeyboardInterrupt:
+            log(f"Reverify interrupted: {ok}/{len(unver)} verified", "warn")
+            break
+        except Exception as e:
+            log(f"Error: {str(e)[:60]}", "warn")
+        time.sleep(5)
+    log(f"Done: {ok}/{len(unver)} verified", "arr")
+    raw_input("  " + DI + "Press Enter" + RS)
+
 
 
 def menu_tokens():
@@ -3890,6 +3961,7 @@ def main():
                 ("4", "Import to 9router", "push keys to router"),
                 ("5", "Settings", "mail server, router, proxy, options"),
                 ("6", "Proxy", "list/check/scrape/vpngate"),
+                ("7", "Reverify", "re-verify unconfirmed accounts"),
                 ("E", "Exit", ""),
             ]
             for n, l, s in items:
@@ -3912,6 +3984,8 @@ def main():
                 menu_settings()
             elif k == '6':
                 menu_proxy(load_cfg())
+            elif k == '7':
+                menu_reverify()
             elif k in ('e', 'E', 'escape', 'ctrl-c'):
                 cls()
                 print(f"\n  {C}╔{'═' * 20}╗{RS}")
