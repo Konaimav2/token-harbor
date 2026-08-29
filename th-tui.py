@@ -1752,10 +1752,15 @@ def create_account(c, email=None, password=None, _retry=True):
             pg = ctx.new_page()
             pg.goto("https://tokenharbor.ai/login?mode=signup", wait_until="domcontentloaded", timeout=min(15000, pw_timeout_ms))
             try:
-                pg.wait_for_load_state("networkidle", timeout=min(10000, pw_timeout_ms))
+                pg.wait_for_load_state("networkidle", timeout=min(15000, pw_timeout_ms))
             except Exception:
                 pass
-            pg.wait_for_selector('input[name="email"]', timeout=min(30000, pw_timeout_ms))
+            # wait for form to render (proxy may be slow)
+            try:
+                pg.wait_for_selector('input[name="email"]', timeout=min(30000, pw_timeout_ms))
+            except Exception:
+                pass
+            time.sleep(2)  # extra settle time for proxy
             time.sleep(1)
             # humanize: load helpers + human-like fill/click
             try:
@@ -1873,10 +1878,18 @@ def create_account(c, email=None, password=None, _retry=True):
                         pg.fill('input[name="email"]', email)
                         pg.fill('input[name="password"]', password)
                         pg.click('button[type="submit"]', timeout=10000)
-                        time.sleep(5)
-                        body = pg.inner_text("body", timeout=8000).lower()
+                        # wait for page to settle after submit
+                        try:
+                            pg.wait_for_load_state("networkidle", timeout=20000)
+                        except Exception:
+                            pass
+                        time.sleep(3)
+                        # re-read body + URL
+                        body = pg.inner_text("body", timeout=10000).lower()
                         url_now = pg.url
-                        if "dashboard" in url_now or "api-keys" in url_now or "dashboard" in body:
+                        _dash_signals = ["balance", "overview", "api key", "tokens", "subscription", "enable f"]
+                        _is_dash = "dashboard" in url_now or "api-keys" in url_now or "dashboard" in body or any(s in body for s in _dash_signals)
+                        if _is_dash:
                             dlog(f"Retry submit succeeded — dashboard reached for {email}")
                             on_dashboard = True
                         else:
