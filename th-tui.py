@@ -1750,7 +1750,7 @@ def create_account(c, email=None, password=None, _retry=True):
             ctx.set_default_timeout(pw_timeout_ms)
             ctx.set_default_navigation_timeout(pw_timeout_ms)
             pg = ctx.new_page()
-            pg.goto("https://tokenharbor.ai/login?mode=signup", wait_until="domcontentloaded", timeout=min(15000, pw_timeout_ms))
+            pg.goto("https://tokenharbor.ai/login?mode=signup", wait_until="domcontentloaded", timeout=pw_timeout_ms)
             try:
                 pg.wait_for_load_state("networkidle", timeout=min(15000, pw_timeout_ms))
             except Exception:
