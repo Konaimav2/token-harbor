@@ -2775,7 +2775,16 @@ def menu_reverify():
                 ok += 1
                 log(f"Verified: {email}", "ok")
             else:
-                log(f"Still unverified: {email}", "warn")
+                # re-check key status — might be verified via different path
+                try:
+                    works, why = _test_key(api_key)
+                    if works:
+                        ok += 1
+                        log(f"Verified (re-check): {email} ({why})", "ok")
+                    else:
+                        log(f"Still unverified: {email} ({why})", "warn")
+                except Exception:
+                    log(f"Still unverified: {email}", "warn")
         except KeyboardInterrupt:
             log(f"Reverify interrupted: {ok}/{len(unver)} verified", "warn")
             break
