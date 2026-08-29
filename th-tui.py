@@ -2599,6 +2599,8 @@ def menu_batch():
             pct = (i + 1) * 100 // n
             # separate line for progress so it doesn't overwrite account logs
             print(f"  {progress(pct, f'({i+1}/{n})')}")
+            # reset proxy tracking so each account gets a fresh proxy
+            c.pop("_used_proxy_ips", None)
             # resolve an address for this round (auto-pick inside run_full_flow)
             email = None
             if using_tempmail and pm:
