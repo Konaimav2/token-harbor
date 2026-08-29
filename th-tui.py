@@ -1699,7 +1699,7 @@ def _solve_captcha(pg, c, timeout=180):
     return None
 
 
-def create_account(c, email=None, password=None):
+def create_account(c, email=None, password=None, _retry=True):
     if c.get("vnc_mode") and not os.environ.get("DISPLAY"):
         os.environ["DISPLAY"] = ":99"
     sys.path.insert(0, str(BASE))
@@ -1853,7 +1853,7 @@ def create_account(c, email=None, password=None):
                     log(f"Retrying {email} with different proxy...", "warn")
                     if proxy_parsed and len(proxy_parsed) > 1:
                         c.setdefault("_used_proxy_ips", []).append(proxy_parsed[1])
-                    return create_account(email, password, c, headless=headless, _retry=False)
+                    return create_account(c, email=email, password=password, _retry=False)
                 return None
     except Exception as e:
         elog(f"create account {email}: {e}", traceback.format_exc()[:200])
