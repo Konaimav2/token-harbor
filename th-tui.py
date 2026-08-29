@@ -2150,10 +2150,11 @@ def _test_key(key, model="deepseek-v4-flash:free"):
             except Exception:
                 pass
     def _req(method, path, body=None):
-        url = (relay + path) if relay else (target + path)
+        # relay: call relay ROOT, x-relay-target = full upstream URL incl path
+        url = relay if relay else (target + path)
         headers = {"Authorization": f"Bearer {key}"}
         if relay:
-            headers["x-relay-target"] = target
+            headers["x-relay-target"] = target + path
         if body is not None:
             headers["Content-Type"] = "application/json"
             return requests.request(method, url, headers=headers, json=body, proxies=proxies, timeout=20)
