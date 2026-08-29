@@ -2264,9 +2264,8 @@ def run_full_flow(c, email=None, password=None, pm=None, provider_hint=None, ski
             dlog(f"Create attempt {attempt}/3 failed for {email}, retrying with fresh proxy...")
             time.sleep(3)
             if c.get("proxy", {}).get("enabled"):
-                # force a different proxy next attempt
-                if proxy_parsed and len(proxy_parsed) > 1:
-                    c["_used_proxy_ips"] = list(c.get("_used_proxy_ips", [])) + [proxy_parsed[1]]
+                # force a different proxy next attempt — add sentinel to skip current
+                c.setdefault("_used_proxy_ips", []).append("__retry__")
     if not r:
         log("Failed to create: " + (email or "(no email)"), "no")
         return None
@@ -4055,7 +4054,10 @@ def main():
                 print(f"  {C}╚{'═' * 20}╝{RS}")
                 break
     finally:
-        signal.signal(signal.SIGINT, old_handler)
+        try:
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+        except Exception:
+            pass
         exit_fullscreen()  # restore terminal on exit (even Ctrl+C)
         raw_end()          # restore cooked mode
 
