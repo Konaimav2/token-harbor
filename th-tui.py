@@ -1594,6 +1594,8 @@ def _next_proxy(c, last=None):
         if not res:
             continue  # dead proxy, try next
         ip = res[1] if len(res) > 1 else (p[1] if len(p) > 1 else "?")
+        if ip in used_ips:
+            continue  # skip previously failed proxy
         c["_used_proxy_ips"] = list(used_ips) + [ip]
         _host = p[1] if len(p) > 1 else "?"
         _port = p[2] if len(p) > 2 else "?"
