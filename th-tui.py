@@ -1860,9 +1860,31 @@ def create_account(c, email=None, password=None, _retry=True):
                 url_now = pg.url
                 _hf = pg.locator('input[name="email"]').count()
                 dlog(f"DETECT: url={url_now} on_dashboard={on_dashboard} on_landing={on_landing} has_form={_hf} body_head={body[:80]}")
-                elog(f"signup unexpected response for {email}: url={url_now} body={body[:120]}")
-                b.close()
-                return None
+                # signup page with form — try submitting (not an error, page just didn't redirect)
+                if _hf > 0 and ("signup" in url_now or "signin" in url_now):
+                    dlog(f"Signup page with form, retrying submit for {email}")
+                    try:
+                        pg.fill('input[name="email"]', email)
+                        pg.fill('input[name="password"]', password)
+                        pg.click('button[type="submit"]', timeout=10000)
+                        time.sleep(5)
+                        body = pg.inner_text("body", timeout=8000).lower()
+                        url_now = pg.url
+                        if "dashboard" in url_now or "api-keys" in url_now or "dashboard" in body:
+                            dlog(f"Retry submit succeeded — dashboard reached for {email}")
+                            on_dashboard = True
+                        else:
+                            elog(f"signup retry failed: url={url_now} body={body[:120]}")
+                            b.close()
+                            return None
+                    except Exception as e:
+                        elog(f"signup retry error: {str(e)[:80]}")
+                        b.close()
+                        return None
+                else:
+                    elog(f"signup unexpected response for {email}: url={url_now} body={body[:120]}")
+                    b.close()
+                    return None
     except Exception as e:
         elog(f"create account {email}: {e}", traceback.format_exc()[:200])
         try:
