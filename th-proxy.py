@@ -42,9 +42,12 @@ def parse_proxy(raw):
     raw = raw.strip()
     if not raw or raw.startswith("#"):
         return None
-    # Relay proxy: https://<anything>.vercel.app (or any https URL w/ x-relay-target)
+    # Relay proxy: https://<anything>.vercel.app (or relay://https://...)
+    # normalize relay:// prefix to https://
+    if raw.startswith("relay://"):
+        raw = raw[len("relay://"):]
     if re.match(r"^https?://[^\s]+$", raw) and "vercel.app" in raw.lower():
-        return "relay", raw.rstrip("/"), 443, None, None
+        return "relay", raw.rstrip("/").rstrip(":443"), 443, None, None
     # standard format: proto://user:pass@host:port
     m = PROXY_RE.match(raw)
     if m:
