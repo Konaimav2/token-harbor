@@ -2581,6 +2581,19 @@ def menu_batch():
     pm = _load_proxy_mod()
     ok = []
     delay = c.get("batch_delay", 30)
+    # warn if batch count exceeds available gmails
+    if t == "mailg":
+        all_mg = get_mailg_accounts()
+        used = load_used()
+        avail = [a for a in all_mg if a.lower() not in used]
+        if n > len(avail):
+            log(f"Warning: batch {n} but only {len(avail)} unregistered gmails available ({len(all_mg)} total, {len(used)} used)", "warn")
+            if len(avail) == 0:
+                log("No unregistered gmails left!", "warn")
+                raw_input("  " + DI + "Press Enter" + RS)
+                return
+            log(f"Capping batch to {len(avail)}", "info")
+            n = len(avail)
     try:
         for i in range(n):
             pct = (i + 1) * 100 // n
@@ -2592,6 +2605,12 @@ def menu_batch():
                 email = pm.get_tempmail_from_pool() or pm.get_public_tempmail()
                 if not email:
                     log("Tempmail pool exhausted", "warn")
+                    break
+            elif t == "mailg":
+                # check if pool still has available gmails
+                avail_check = [a for a in get_mailg_accounts() if a.lower() not in load_used()]
+                if not avail_check:
+                    log("All gmails registered — pool exhausted", "warn")
                     break
             r = run_full_flow(c, email) if email else run_full_flow(c)
             if r:
