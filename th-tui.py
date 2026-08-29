@@ -1748,8 +1748,12 @@ def create_account(c, email=None, password=None):
             ctx.set_default_timeout(pw_timeout_ms)
             ctx.set_default_navigation_timeout(pw_timeout_ms)
             pg = ctx.new_page()
-            pg.goto("https://tokenharbor.ai/login?mode=signup", wait_until="domcontentloaded", timeout=pw_timeout_ms)
-            pg.wait_for_selector('input[name="email"]', timeout=pw_timeout_ms)
+            pg.goto("https://tokenharbor.ai/login?mode=signup", wait_until="domcontentloaded", timeout=min(30000, pw_timeout_ms))
+            try:
+                pg.wait_for_load_state("networkidle", timeout=min(15000, pw_timeout_ms))
+            except Exception:
+                pass
+            pg.wait_for_selector('input[name="email"]', timeout=min(60000, pw_timeout_ms))
             time.sleep(1)
             # humanize: load helpers + human-like fill/click
             try:
