@@ -1570,7 +1570,7 @@ def _next_proxy(c, last=None):
     if order == "least":
         p, ip = pm.smart_pick_proxy(proxies, used_ips=used_ips)
         if p:
-            c["_used_proxy_ips"] = list(used_ips) + [ip]
+            pass  # caller adds to _used_proxy_ips on failure
             log(f"Using proxy: {p[1] if len(p)>1 else '?'}:{p[2] if len(p)>2 else '?'} (IP: {ip}, order=least)", "info")
             return p
         return None
@@ -1596,7 +1596,7 @@ def _next_proxy(c, last=None):
         ip = res[1] if len(res) > 1 else (p[1] if len(p) > 1 else "?")
         if ip in used_ips:
             continue  # skip previously failed proxy
-        c["_used_proxy_ips"] = list(used_ips) + [ip]
+        c["_last_proxy_ip"] = ip  # track for failure reporting
         _host = p[1] if len(p) > 1 else "?"
         _port = p[2] if len(p) > 2 else "?"
         log(f"Using proxy: {_host}:{_port} (IP: {ip}, order={order})", "info")
@@ -2274,8 +2274,10 @@ def run_full_flow(c, email=None, password=None, pm=None, provider_hint=None, ski
             dlog(f"Create attempt {attempt}/3 failed for {email}, retrying with fresh proxy...")
             time.sleep(3)
             if c.get("proxy", {}).get("enabled"):
-                # force a different proxy next attempt — add sentinel to skip current
-                c.setdefault("_used_proxy_ips", []).append("__retry__")
+                # add the FAILED proxy IP to skip it next attempt
+                failed_ip = c.get("_last_proxy_ip")
+                if failed_ip:
+                    c.setdefault("_used_proxy_ips", []).append(failed_ip)
     if not r:
         log("Failed to create: " + (email or "(no email)"), "no")
         return None
