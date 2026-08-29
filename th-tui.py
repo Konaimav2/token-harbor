@@ -1794,7 +1794,9 @@ def create_account(c, email=None, password=None, _retry=True):
             on_dashboard = "dashboard" in url or "api-keys" in url or "dashboard" in body or "api-keys" in body
             # signup page has form + marketing text — NOT a landing page
             has_form = pg.locator('input[name="email"]').count() > 0
-            on_landing = "token harbor" in body and "one harbor" in body and "dashboard" not in body and not has_form
+            # /login?mode=signup is the signup page (has form + marketing text)
+            is_signup = "mode=signup" in url or "mode=signin" in url
+            on_landing = "token harbor" in body and "one harbor" in body and "dashboard" not in body and not has_form and not is_signup
             # if page shows "loading", wait for it to finish
             if on_dashboard and "loading" in body:
                 try:
@@ -1856,6 +1858,8 @@ def create_account(c, email=None, password=None, _retry=True):
                 return None
             else:
                 url_now = pg.url
+                _hf = pg.locator('input[name="email"]').count()
+                dlog(f"DETECT: url={url_now} on_dashboard={on_dashboard} on_landing={on_landing} has_form={_hf} body_head={body[:80]}")
                 elog(f"signup unexpected response for {email}: url={url_now} body={body[:120]}")
                 b.close()
                 return None
