@@ -1581,8 +1581,6 @@ def _next_proxy(c, last=None):
         if not res:
             continue  # dead proxy, try next
         ip = res[1] if len(res) > 1 else (p[1] if len(p) > 1 else "?")
-        if ip in used_ips:
-            continue
         c["_used_proxy_ips"] = list(used_ips) + [ip]
         _host = p[1] if len(p) > 1 else "?"
         _port = p[2] if len(p) > 2 else "?"
@@ -1834,7 +1832,8 @@ def create_account(c, email=None, password=None):
                 # retry with a different proxy (current proxy IP may be registered or page stalled)
                 if _retry and c.get("proxy", {}).get("enabled"):
                     log(f"Retrying {email} with different proxy...", "warn")
-                    c.setdefault("_used_proxy_ips", []).append("__retry__")
+                    if proxy_parsed and len(proxy_parsed) > 1:
+                        c.setdefault("_used_proxy_ips", []).append(proxy_parsed[1])
                     return create_account(email, password, c, headless=headless, _retry=False)
                 return None
     except Exception as e:
@@ -2257,7 +2256,8 @@ def run_full_flow(c, email=None, password=None, pm=None, provider_hint=None, ski
             time.sleep(3)
             if c.get("proxy", {}).get("enabled"):
                 # force a different proxy next attempt
-                c["_used_proxy_ips"] = list(c.get("_used_proxy_ips", [])) + ["__retry__"]
+                if proxy_parsed and len(proxy_parsed) > 1:
+                    c["_used_proxy_ips"] = list(c.get("_used_proxy_ips", [])) + [proxy_parsed[1]]
     if not r:
         log("Failed to create: " + (email or "(no email)"), "no")
         return None
@@ -2599,8 +2599,6 @@ def menu_batch():
             pct = (i + 1) * 100 // n
             # separate line for progress so it doesn't overwrite account logs
             print(f"  {progress(pct, f'({i+1}/{n})')}")
-            # reset proxy tracking so each account gets a fresh proxy
-            c.pop("_used_proxy_ips", None)
             # resolve an address for this round (auto-pick inside run_full_flow)
             email = None
             if using_tempmail and pm:
