@@ -415,10 +415,19 @@ def _kdump(c, tag):
         pass
 
 
+# Global interrupt flag for Ctrl+C during batch
+_BATCH_INTERRUPT = False
+
+def _batch_sigint_handler(sig, frame):
+    global _BATCH_INTERRUPT
+    _BATCH_INTERRUPT = True
+
 def interruptible_sleep(seconds, label=""):
     """Sleep that can be interrupted by Ctrl+C."""
     end = time.time() + seconds
     while time.time() < end:
+        if _BATCH_INTERRUPT:
+            raise KeyboardInterrupt
         time.sleep(min(1, end - time.time()))
 
 
@@ -2594,8 +2603,13 @@ def menu_batch():
                 return
             log(f"Capping batch to {len(avail)}", "info")
             n = len(avail)
+    global _BATCH_INTERRUPT
+    _BATCH_INTERRUPT = False
+    old_handler = signal.signal(signal.SIGINT, _batch_sigint_handler)
     try:
         for i in range(n):
+            if _BATCH_INTERRUPT:
+                raise KeyboardInterrupt
             pct = (i + 1) * 100 // n
             # separate line for progress so it doesn't overwrite account logs
             print(f"  {progress(pct, f'({i+1}/{n})')}")
@@ -2613,6 +2627,8 @@ def menu_batch():
                     log("All gmails registered — pool exhausted", "warn")
                     break
             r = run_full_flow(c, email) if email else run_full_flow(c)
+            if _BATCH_INTERRUPT:
+                raise KeyboardInterrupt
             if r:
                 ok.append(r)
                 print(f"  ✓ {r.get('email','') if isinstance(r, dict) else (email or '')} OK")
@@ -2685,7 +2701,7 @@ def menu_reverify():
             break
         except Exception as e:
             log(f"Error: {str(e)[:60]}", "warn")
-        time.sleep(5)
+        interruptible_sleep(5)
     log(f"Done: {ok}/{len(unver)} verified", "arr")
     raw_input("  " + DI + "Press Enter" + RS)
 
@@ -4039,6 +4055,7 @@ def main():
                 print(f"  {C}╚{'═' * 20}╝{RS}")
                 break
     finally:
+        signal.signal(signal.SIGINT, old_handler)
         exit_fullscreen()  # restore terminal on exit (even Ctrl+C)
         raw_end()          # restore cooked mode
 
