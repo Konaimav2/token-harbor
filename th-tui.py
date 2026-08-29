@@ -237,9 +237,13 @@ def load_env():
         return False
 
 
-def elog(msg, detail=""):
+def _ts():
+    return time.strftime("%H:%M:%S")
+
+
+def elog(msg, detail="" ):
     """Error log with optional detail lines."""
-    print(f"  {R}X{RS} {msg}", flush=True)
+    print(f"  {R}X{RS} [{_ts()}] {msg}", flush=True)
     if detail:
         for line in str(detail).strip().split("\n"):
             print(f"    {DI}{line}{RS}", flush=True)
@@ -249,7 +253,7 @@ def log(msg, icon="info"):
     """Concise log — shows on CLI AND writes a line to farm.log."""
     icons = {"ok": f"{G}OK{RS}", "no": f"{R}XX{RS}", "warn": f"{Y}!{RS}",
              "info": f"{B}i{RS}", "arr": f"{M}-{RS}"}
-    print(f"  {icons.get(icon, '-')} {msg}", flush=True)
+    print(f"  {icons.get(icon, '-')} [{_ts()}] {msg}", flush=True)
     # append to farm log file too (for unattended runs)
     try:
         LOG_FILE = BASE / "farm.log"
