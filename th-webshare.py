@@ -99,7 +99,7 @@ def _real_name_email(domain):
         return None
 
 
-def _build_mail_pool(mails_arg, used):
+def _build_mail_pool(mails_arg, used, create_new=False):
     """Return (pool, source-label) per --mails selection. Empty pool = fall back to file/gen."""
     servers = _load_mail_servers()
     arg = (mails_arg or "").strip().lower()
@@ -116,13 +116,28 @@ def _build_mail_pool(mails_arg, used):
         # real-name addresses across ALL catch-all domains
         doms = _cloud_domains(servers)
         pool = []
-        for d in doms:
-            for _ in range(50):  # up to 50 fresh real-name candidates per domain
-                e = _real_name_email(d)
-                if e and e not in used and e not in pool:
-                    pool.append(e)
-                    break
-        log(f"--mails cloud-mail: {len(pool)} fresh real-name addresses across {len(doms)} domains")
+        if create_new:
+            # generate fresh NEW mailboxes (skip used/blacklist), not from API listing
+            for d in doms:
+                for _ in range(200):
+                    e = _real_name_email(d)
+                    if e and e not in used and e not in pool:
+                        pool.append(e)
+                        break
+            log(f"--mails cloud-mail --create: {len(pool)} fresh NEW addresses across {len(doms)} domains")
+        else:
+            # use existing mailboxes from cloudmail API (minus used/blacklisted)
+            try:
+                import importlib.util
+                spec = importlib.util.spec_from_file_location("tt", str(BASE / "th-tui.py"))
+                m = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(m)
+                existing = m.get_cloudmail_addresses() or []
+                pool = _fresh(existing)
+                log(f"--mails cloud-mail: {len(pool)} existing cloudmail inboxes (minus used/blacklist)")
+            except Exception as e:
+                log(f"cloud-mail pool unavailable: {str(e)[:60]}", "warn")
+                pool = []
         return pool, "cloud-mail"
 
     if arg == "mailg":
@@ -1000,6 +1015,8 @@ def main():
     ap.add_argument("--mails", default=None,
                     help="Mail source: 'cloud-mail' (catch-all domains from config.json), "
                          "'mailg' (gmail-inbox accounts), or a mail-server name from config.json")
+    ap.add_argument("--create", action="store_true",
+                    help="For cloud-mail: generate fresh new mailboxes (not from API list)")
     ap.add_argument("--proxy-order", default="random", choices=["random", "top", "least"],
                     help="Proxy pick order: random (default), top (sequential), least-used")
     ap.add_argument("--skip-wait-throttle", action="store_true", default=False,
@@ -1038,12 +1055,16 @@ def main():
         log(f"MailG pool unavailable: {str(_e)[:60]}", "warn")
     mails_pool, mails_src = (None, None)
     if args.mails:
-        mails_pool, mails_src = _build_mail_pool(args.mails, used)
+        mails_pool, mails_src = _build_mail_pool(args.mails, used, create_new=args.create)
     if args.mails and not mails_pool:
         log("--mails produced no addresses — falling back to email file/generator", "warn")
     if args.mails and mails_pool:
         random.shuffle(mails_pool)
         email_pool = mails_pool
+        # warn + cap if pool smaller than requested count
+        if len(email_pool) < args.count:
+            log(f"Warning: {args.count} requested but only {len(email_pool)} mails available — capping to {len(email_pool)}", "warn")
+            args.count = len(email_pool)
     elif args.email_file:
         try:
             pool = [e.strip().lower() for e in open(args.email_file).readlines() if e.strip() and "@" in e]
