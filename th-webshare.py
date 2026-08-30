@@ -13,6 +13,7 @@ Usage:
   python3 th-webshare.py --count 5 --captcha-key XXX --captcha-provider 2captcha
 """
 import os, sys, time, json, random, re, argparse, traceback
+import importlib.util
 from pathlib import Path
 import socket  # for proxy IP resolution
 
