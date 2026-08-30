@@ -1951,17 +1951,20 @@ def create_account(c, email=None, password=None, _retry=True):
                             dlog(f"Retry submit succeeded — dashboard reached for {email}")
                             on_dashboard = True
                         else:
-                            elog(f"signup retry failed: {_explain_signup_fail('', url_now, body[:120])}")
+                            _why_signup = _explain_signup_fail('', url_now, body[:120])
+                            elog(f"signup retry failed: {_why_signup} | raw={body[:150]}")
                             _shot_fail(pg, email)
                             b.close()
                             return None
                     except Exception as e:
-                        elog(f"signup retry error: {_explain_signup_fail(str(e), '', '')}")
+                        _why_signup = _explain_signup_fail(str(e), '', '')
+                        elog(f"signup retry error: {_why_signup} | raw={str(e)[:150]}")
                         _shot_fail(pg, email)
                         b.close()
                         return None
                 else:
-                    elog(f"signup unexpected: {_explain_signup_fail('', url_now, body[:120])}")
+                    _why_signup = _explain_signup_fail('', url_now, body[:120])
+                    elog(f"signup unexpected: {_why_signup} | raw={body[:150]}")
                     _shot_fail(pg, email)
                     b.close()
                     return None
