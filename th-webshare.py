@@ -1236,8 +1236,9 @@ def main():
     current_proxy_idx = None   # index into proxy_list
     proxy_blocked = set()      # indices temporarily blocked (throttled)
 
-    # Persistent proxy cooldown (shared across runs, like TUI's proxy_ratelimit.json)
-    WS_BLOCK_FILE = BASE / "ws_blocked.json"
+    # Persistent proxy cooldown — SHARED with TUI's proxy_ratelimit.json so a
+    # block in webshare also skips that proxy in later TUI runs (and vice versa).
+    WS_BLOCK_FILE = BASE / "proxy_ratelimit.json"
     _blocked_store = {}
     try:
         if WS_BLOCK_FILE.exists():
@@ -1246,19 +1247,30 @@ def main():
         _blocked_store = {}
 
     def _pid(parsed):
-        """Stable proxy id (host:port)."""
+        """Stable proxy id — same format as TUI's _proxy_id."""
         try:
-            return f"{parsed[1]}:{parsed[2]}"
+            return f"{parsed[0]}://{parsed[1]}:{parsed[2]}" + (f":{parsed[3]}" if len(parsed) > 3 and parsed[3] else "")
         except Exception:
-            return ""
+            try:
+                return f"{parsed[1]}:{parsed[2]}"
+            except Exception:
+                return ""
 
     def _is_persist_blocked(parsed):
         pid = _pid(parsed)
         ts = _blocked_store.get(pid)
         if ts is None:
             return False
+        try:
+            ts = float(ts)
+        except Exception:
+            return False
         if time.time() - ts > 3600:  # expired after 1h
             _blocked_store.pop(pid, None)
+            try:
+                WS_BLOCK_FILE.write_text(json.dumps(_blocked_store, indent=2))
+            except Exception:
+                pass
             return False
         return True
 
@@ -1267,7 +1279,7 @@ def main():
         if pid:
             _blocked_store[pid] = time.time()
             try:
-                WS_BLOCK_FILE.write_text(json.dumps(_blocked_store))
+                WS_BLOCK_FILE.write_text(json.dumps(_blocked_store, indent=2))
             except Exception:
                 pass
 
