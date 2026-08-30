@@ -979,11 +979,35 @@ def _port_open(port, timeout_s=1.5):
         s.close()
 
 
+def _env_vnc_pw():
+    """Read VNC_PASSWORD from <project>/.env (returns '' if unset)."""
+    env_path = BASE / ".env"
+    if not env_path.exists():
+        return ""
+    try:
+        for line in open(env_path):
+            line = line.strip()
+            if line.startswith("VNC_PASSWORD=") and not line.startswith("#"):
+                return line.split("=", 1)[1].strip().strip("'\"")
+    except Exception:
+        pass
+    return ""
+
+
 def _start_vnc_stack():
     """Ensure Xvfb(:99) + x11vnc(5900) + websockify(6080) are running for headed mode.
     Non-blocking; each component started only if its port/process is missing."""
     import subprocess as _sp
-    auth_xs = "Phoe9Ceixingie5ahsah7fieruNg2eijujoofoA1apu6uwevuv8ait3ieshahh3ish"
+    vnc_pw = os.environ.get("VNC_PASSWORD", "")
+    # read VNC_PASSWORD from <project>/.env if set (same source as th-tui)
+    env_path = BASE / ".env"
+    if not vnc_pw and env_path.exists():
+        for line in open(env_path):
+            line = line.strip()
+            if line.startswith("VNC_PASSWORD=") and not line.startswith("#"):
+                vnc_pw = line.split("=", 1)[1].strip().strip("'\"")
+                break
+    auth_xs = vnc_pw or "Phoe9Ceixingie5ahsah7fieruNg2eijujoofoA1apu6uwevuv8ait3ieshahh3ish"
     os.environ.setdefault("DISPLAY", ":99")
     # 1. Xvfb — process + display check
     if not (_sp.call("pgrep -x Xvfb >/dev/null 2>&1", shell=True) == 0):
@@ -999,6 +1023,13 @@ def _start_vnc_stack():
         if not os.path.exists("/run/x11vnc-passwd"):
             _sp.run('x11vnc -storepasswd "%s" /run/x11vnc-passwd' % auth_xs, shell=True)
             try:
+                os.chmod("/run/x11vnc-passwd", 0o600)
+            except Exception:
+                pass
+        elif os.environ.get("VNC_PASSWORD") or _env_vnc_pw():
+            # refresh stored passwd to match .env (avoids stale/old pw)
+            try:
+                _sp.run('x11vnc -storepasswd "%s" /run/x11vnc-passwd' % auth_xs, shell=True)
                 os.chmod("/run/x11vnc-passwd", 0o600)
             except Exception:
                 pass
