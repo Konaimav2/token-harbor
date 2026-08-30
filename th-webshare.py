@@ -302,7 +302,10 @@ def _verify_in_browser(pg, email):
         for msg in msgs:
             body = str(msg.get("text", "")) + " " + str(msg.get("html", ""))
             urls = re.findall(r'https?://[^\s"<>]+', body)
-            verify_urls = [u for u in urls if any(w in u.lower() for w in ["verify", "confirm", "activate"])]
+            # Only match verification links FROM webshare (not TH/other services using same inbox)
+            _ws_verify = ["dashboard.webshare.io", "proxy.webshare.io", "t.webshare.io", "webshare.io"]
+            verify_urls = [u for u in urls if any(w in u.lower() for w in ["verify", "confirm", "activate"])
+                           and any(d in u.lower() for d in _ws_verify)]
             if verify_urls:
                 url = verify_urls[0]
                 log(f"Verification link found for {email}, opening in browser...", "ok")
@@ -373,7 +376,10 @@ def _verify_webshare_email(email, timeout=15):
             for msg in msgs:
                 body = str(msg.get("text", "")) + " " + str(msg.get("html", ""))
                 urls = re.findall(r'https?://[^\s"<>]+', body)
-                verify_urls = [u for u in urls if any(w in u.lower() for w in ["verify", "confirm", "activate", "email"])]
+                # Only match verification links FROM webshare (not TH/other services)
+                _ws_verify2 = ["dashboard.webshare.io", "proxy.webshare.io", "t.webshare.io", "webshare.io"]
+                verify_urls = [u for u in urls if any(w in u.lower() for w in ["verify", "confirm", "activate", "email"])
+                               and any(d in u.lower() for d in _ws_verify2)]
                 if verify_urls:
                     url = verify_urls[0]
                     log(f"Verification link found for {email}, clicking...", "ok")
