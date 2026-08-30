@@ -328,10 +328,11 @@ def check_proxy(parsed, timeout=8):
             city = j.get("city", "")
             loc = j.get("loc", "")
             region_str = ",".join(x for x in (country, city) if x)
-            # Hard checks: proxy must reach real sites + not be Google-flagged.
-            # A proxy that passes ipinfo but fails google/cloudflare/recaptcha is
-            # dead or flagged for real browsing — kill it.
-            for _site in ["https://www.google.com", "https://www.cloudflare.com"]:
+            # Hard checks but LIGHTWEIGHT — full homepage fetches burned webshare
+            # free bandwidth (google+cloudflare ~5MB/check × hundreds of proxies =
+            # gigabytes). Use zero/near-zero payload probes only.
+            for _site in ["https://www.google.com/generate_204",
+                          "https://www.cloudflare.com/cdn-cgi/trace"]:
                 try:
                     rq.get(_site, proxies=proxies, timeout=timeout,
                             headers={"User-Agent": random.choice(USER_AGENTS)})
