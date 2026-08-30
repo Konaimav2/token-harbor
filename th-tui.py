@@ -1706,7 +1706,7 @@ def _shot_fail(pg, email):
         _dir.mkdir(exist_ok=True)
         _shot = _dir / f"signup_fail_{email.split('@')[0]}.png"
         pg.screenshot(path=str(_shot), full_page=True)
-        dlog(f"Screenshot saved: {_shot}")
+        log(f"Screenshot saved: {_shot}", "info")
         return str(_shot)
     except Exception:
         return None
@@ -1793,6 +1793,22 @@ def create_account(c, email=None, password=None, _retry=True):
             ctx.set_default_timeout(pw_timeout_ms)
             ctx.set_default_navigation_timeout(pw_timeout_ms)
             pg = ctx.new_page()
+            _api_errors = []
+            def _on_api_resp(resp):
+                try:
+                    if resp.request.method == "POST" and resp.status >= 400:
+                        ct = (resp.headers.get("content-type") or "").lower()
+                        if "json" in ct:
+                            j = resp.json()
+                            if isinstance(j, dict) and ("error" in j or "message" in j):
+                                msg = j.get("error", {})
+                                if isinstance(msg, dict):
+                                    msg = msg.get("message", "")
+                                text = f"{resp.status}:{str(msg)[:150]}" if msg else f"{resp.status}:{str(j)[:150]}"
+                                _api_errors.append(text)
+                except Exception:
+                    pass
+            pg.on("response", _on_api_resp)
             pg.goto("https://tokenharbor.ai/login?mode=signup", wait_until="domcontentloaded", timeout=pw_timeout_ms)
             try:
                 pg.wait_for_load_state("networkidle", timeout=min(15000, pw_timeout_ms))
@@ -1952,19 +1968,22 @@ def create_account(c, email=None, password=None, _retry=True):
                             on_dashboard = True
                         else:
                             _why_signup = _explain_signup_fail('', url_now, body[:120])
-                            elog(f"signup retry failed: {_why_signup} | raw={body[:150]}")
+                            _api = _api_errors[-1] if _api_errors else 'none'
+                            elog(f"signup retry failed: {_why_signup} | api={_api} | page={body[:100]}")
                             _shot_fail(pg, email)
                             b.close()
                             return None
                     except Exception as e:
                         _why_signup = _explain_signup_fail(str(e), '', '')
-                        elog(f"signup retry error: {_why_signup} | raw={str(e)[:150]}")
+                        _api = _api_errors[-1] if _api_errors else 'none'
+                        elog(f"signup retry error: {_why_signup} | api={_api} | raw={str(e)[:120]}")
                         _shot_fail(pg, email)
                         b.close()
                         return None
                 else:
                     _why_signup = _explain_signup_fail('', url_now, body[:120])
-                    elog(f"signup unexpected: {_why_signup} | raw={body[:150]}")
+                    _api = _api_errors[-1] if _api_errors else 'none'
+                    elog(f"signup unexpected: {_why_signup} | api={_api} | page={body[:100]}")
                     _shot_fail(pg, email)
                     b.close()
                     return None
@@ -2409,7 +2428,7 @@ def run_full_flow(c, email=None, password=None, pm=None, provider_hint=None, ski
     # 1. CREATE (with proxy rotation: fail 3x → rotate proxy → retry same account)
     log(f"Registering {email}...", "arr")
     r = None
-    max_attempts = 12  # up to 4 proxy rotations × 3 tries each
+    max_attempts = 30  # up to 10 proxy rotations × 3 tries each — NEVER give up on the account
     proxy_fail_count = 0
     for attempt in range(1, max_attempts + 1):
         r = create_account(c, email=email, password=password)
@@ -2418,11 +2437,11 @@ def run_full_flow(c, email=None, password=None, pm=None, provider_hint=None, ski
             break
         proxy_fail_count += 1
         if proxy_fail_count >= 3:
-            # rotate to next proxy after 3 failures
+            # rotate to next proxy after 3 failures — SAME account kept
             failed_ip = c.get("_last_proxy_ip")
             if failed_ip:
                 c.setdefault("_used_proxy_ips", []).append(failed_ip)
-                log(f"Proxy failed 3x ({failed_ip}), rotating...", "warn")
+                log(f"Proxy failed 3x ({failed_ip}), rotating -> retry {email} with new proxy", "warn")
             proxy_fail_count = 0
         else:
             dlog(f"Create attempt {attempt}/{max_attempts} failed for {email}, retrying same proxy...")
