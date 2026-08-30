@@ -954,6 +954,36 @@ def _solve_paid(api_key, provider):
     return None
 
 
+def _start_vnc_stack():
+    """Ensure Xvfb(:99) + x11vnc + websockify are running for headed mode."""
+    import subprocess as _sp
+    # 1. Xvfb
+    if not (_sp.call("pgrep -x Xvfb >/dev/null 2>&1", shell=True) == 0):
+        _sp.Popen(["Xvfb", ":99", "-screen", "0", "1280x900x24", "-nolisten", "tcp"],
+                  stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        time.sleep(2)
+        log("Started Xvfb :99", "ok")
+    os.environ.setdefault("DISPLAY", ":99")
+    # 2. x11vnc
+    if not (_sp.call("pgrep -f 'x11vnc -display :99' >/dev/null 2>&1", shell=True) == 0):
+        vnc_pw = os.environ.get("VNC_PASSWORD", "")
+        cmd = ["x11vnc", "-display", ":99", "-forever", "-shared", "-nopw"]
+        if vnc_pw:
+            cmd += ["-passwdfile", "/dev/stdin"]
+            p = _sp.Popen(cmd, stdin=_sp.PIPE, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+            p.communicate(vnc_pw.encode())
+        else:
+            _sp.Popen(cmd, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        time.sleep(1)
+        log("Started x11vnc :99", "ok")
+    # 3. websockify noVNC
+    if not (_sp.call("pgrep -f 'websockify' >/dev/null 2>&1", shell=True) == 0):
+        _sp.Popen(["websockify", "--web=/opt/noVNC", "6080", "127.0.0.1:5900"],
+                  stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        time.sleep(1)
+        log("Started websockify :6080", "ok")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--count", type=int, default=1)
@@ -977,6 +1007,10 @@ def main():
     ap.add_argument("--max-per-proxy", type=int, default=0,
                     help="Rotate to a new proxy after N accounts (0=unlimited/sticky until throttle)")
     args = ap.parse_args()
+
+    # Auto-start Xvfb + VNC stack if headed mode requested (--vnc / --vnc-auto)
+    if args.vnc or args.vnc_auto:
+        _start_vnc_stack()
 
     # Load emails from file if provided
     email_pool = None
@@ -1035,6 +1069,11 @@ def main():
 
     proxy_list = None
     proxy_usage = {}  # usage count per proxy index
+    
+    # Auto-load proxy.txt if no --proxy given (top order default)
+    if not args.proxy:
+        args.proxy_order = getattr(args, "proxy_order", "top") or "top"
+        args.proxy = str(PROXY_LIST)
     
     if args.proxy:
         import importlib.util
