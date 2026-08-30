@@ -2151,14 +2151,24 @@ def _test_key(key, model="deepseek-v4-flash:free"):
                 pass
     def _req(method, path, body=None):
         # relay: call relay ROOT, x-relay-target = full upstream URL incl path
-        url = relay if relay else (target + path)
         headers = {"Authorization": f"Bearer {key}"}
-        if relay:
-            headers["x-relay-target"] = target + path
         if body is not None:
             headers["Content-Type"] = "application/json"
-            return requests.request(method, url, headers=headers, json=body, proxies=proxies, timeout=20)
-        return requests.request(method, url, headers=headers, proxies=proxies, timeout=20)
+        kw = dict(headers=headers, proxies=proxies, timeout=20)
+        if body is not None:
+            kw["json"] = body
+        # try relay first; fall back to direct if relay fails (POST often breaks)
+        if relay:
+            try:
+                rh = dict(headers)
+                rh["x-relay-target"] = target + path
+                r = requests.request(method, relay, **{**kw, "headers": rh})
+                if r.status_code >= 500 or "FUNCTION_INVOCATION_FAILED" in r.text[:100]:
+                    raise RuntimeError("relay failed")
+                return r
+            except Exception:
+                pass  # fall through to direct
+        return requests.request(method, target + path, **kw)
 
     def _is_json_resp(r):
         ct = r.headers.get("content-type", "")
