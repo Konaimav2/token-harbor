@@ -1104,11 +1104,20 @@ def main():
             try:
                 proxies = [line.strip() for line in open(proxy_path).readlines() if line.strip() and not line.startswith("#")]
                 if proxies:
-                    log(f"Loading {len(proxies)} proxies from {proxy_path} for rotation")
-                    proxy_list = [(tp.parse_proxy(p), idx) for idx, p in enumerate(proxies)]  # (parsed, index)
-                    for idx in range(len(proxy_list)):
-                        proxy_usage[idx] = 0
-                    log(f"Proxy rotation enabled: {len(proxies)} proxies available")
+                    parsed = [tp.parse_proxy(p) for p in proxies]
+                    # skip relay proxies (https://*.vercel.app) — they can't be Playwright socket proxies
+                    before = len(parsed)
+                    parsed = [pp for pp in parsed if pp and pp[0] != "relay"]
+                    if len(parsed) < before:
+                        log(f"Skipped {before - len(parsed)} relay proxies (not usable for browser)", "info")
+                    if parsed:
+                        log(f"Loading {len(parsed)} proxies from {proxy_path} for rotation")
+                        proxy_list = [(pp, idx) for idx, pp in enumerate(parsed)]
+                        for idx in range(len(proxy_list)):
+                            proxy_usage[idx] = 0
+                        log(f"Proxy rotation enabled: {len(parsed)} proxies available")
+                    else:
+                        log("Warning: no usable (non-relay) proxies in file, proceeding without proxy")
                 else:
                     log("Warning: proxy file empty, proceeding without proxy")
             except Exception as e:

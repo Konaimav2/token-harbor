@@ -425,6 +425,7 @@ _BATCH_INTERRUPT = False
 def _batch_sigint_handler(sig, frame):
     global _BATCH_INTERRUPT
     _BATCH_INTERRUPT = True
+    raise KeyboardInterrupt
 
 def interruptible_sleep(seconds, label=""):
     """Sleep that can be interrupted by Ctrl+C."""
