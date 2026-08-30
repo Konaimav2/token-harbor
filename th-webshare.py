@@ -99,7 +99,7 @@ def _real_name_email(domain):
         return None
 
 
-def _build_mail_pool(mails_arg, used, th_emails):
+def _build_mail_pool(mails_arg, used):
     """Return (pool, source-label) per --mails selection. Empty pool = fall back to file/gen."""
     servers = _load_mail_servers()
     arg = (mails_arg or "").strip().lower()
@@ -108,7 +108,7 @@ def _build_mail_pool(mails_arg, used, th_emails):
         out = []
         for a in lst:
             a = a.strip().lower()
-            if a and "@" in a and a not in used and a not in th_emails and a not in out:
+            if a and "@" in a and a not in used and a not in out:
                 out.append(a)
         return out
 
@@ -117,9 +117,9 @@ def _build_mail_pool(mails_arg, used, th_emails):
         doms = _cloud_domains(servers)
         pool = []
         for d in doms:
-            for _ in range(30):  # up to 30 candidates per domain
+            for _ in range(50):  # up to 50 fresh real-name candidates per domain
                 e = _real_name_email(d)
-                if e and e not in used and e not in th_emails and e not in pool:
+                if e and e not in used and e not in pool:
                     pool.append(e)
                     break
         log(f"--mails cloud-mail: {len(pool)} fresh real-name addresses across {len(doms)} domains")
@@ -145,7 +145,7 @@ def _build_mail_pool(mails_arg, used, th_emails):
         return [], arg
     stype = str(srv.get("type", "")).lower()
     if stype == "mailg":
-        return _build_mail_pool("mailg", used, th_emails)
+        return _build_mail_pool("mailg", used)
     d = (srv.get("domain") or "").strip().lower()
     if not d:
         log(f"server '{arg}' has no domain — falling back", "warn")
@@ -153,7 +153,7 @@ def _build_mail_pool(mails_arg, used, th_emails):
     pool = []
     for _ in range(50):
         e = _real_name_email(d)
-        if e and e not in used and e not in th_emails and e not in pool:
+        if e and e not in used and e not in pool:
             pool.append(e)
     log(f"--mails {arg}: {len(pool)} fresh addresses @{d}")
     return pool, arg
@@ -208,14 +208,12 @@ def _mark_used(email):
     log(f"⊘ used/rejected: {email}", "warn")
 
 
-def pick_fresh_email(pool, used, th_emails=None):
-    """Pick an email not yet used. If pool exhausted, generate a random catch-all one.
-    Skips TH-registered (th_emails) so real account emails are never reused for webshare."""
-    th_emails = th_emails or set()
-    # 1. try pool (unused catch-all from keys.txt)
+def pick_fresh_email(pool, used):
+    """Pick an email not yet used for webshare. If pool exhausted, generate a random catch-all one."""
+    # 1. try pool (unused from mail source)
     while pool:
         e = pool.pop(0).strip().lower()
-        if e and "@" in e and e not in used and e not in th_emails:
+        if e and "@" in e and e not in used:
             return e
     # 2. fallback: random catch-all on known good domains (avoid flagged ones)
     import random as _r
@@ -223,7 +221,7 @@ def pick_fresh_email(pool, used, th_emails=None):
                "arraffi.my.id", "arqonara.web.id", "berapi.eu.cc"]
     for _ in range(50):
         e = f"ws{_r.randint(10,99999)}{_r.choice(['','a','b','c','d','e'])}@{_r.choice(domains)}"
-        if e not in used and e not in th_emails:
+        if e not in used:
             return e
     return None
 
@@ -983,15 +981,10 @@ def main():
     # Load emails from file if provided
     email_pool = None
     used = load_used_emails()
-    # load TH-registered emails from keys.txt so we never reuse them for webshare
-    try:
-        _th_emails = {line.split("|")[0].strip().lower() for line in open(BASE / "keys.txt") if "@" in line}
-    except Exception:
-        _th_emails = set()
     # load the personal/used blacklist — personal emails must never hit webshare
     try:
         _bl = {line.strip().lower() for line in open(BASE / "email-blacklist.txt") if line.strip() and "@" in line}
-        _th_emails |= _bl
+        used |= _bl
     except Exception:
         pass
     # MailG accounts (gmail-inbox :8790) join the pool alongside the catch-all file.
@@ -1003,7 +996,7 @@ def main():
         _tt = __import__("importlib").util.module_from_spec(spec_mg)
         spec_mg.loader.exec_module(_tt)
         mg = [a.strip().lower() for a in (_tt.get_mailg_accounts() or []) if "@" in a]
-        mg = [a for a in mg if a not in used and a not in _th_emails]
+        mg = [a for a in mg if a not in used]
         if mg:
             log(f"MailG pool: {len(mg)} unused accounts available", "ok")
     except Exception as _e:
@@ -1011,7 +1004,7 @@ def main():
         log(f"MailG pool unavailable: {str(_e)[:60]}", "warn")
     mails_pool, mails_src = (None, None)
     if args.mails:
-        mails_pool, mails_src = _build_mail_pool(args.mails, used, _th_emails)
+        mails_pool, mails_src = _build_mail_pool(args.mails, used)
     if args.mails and not mails_pool:
         log("--mails produced no addresses — falling back to email file/generator", "warn")
     if args.mails and mails_pool:
@@ -1028,15 +1021,15 @@ def main():
                 random.shuffle(pool)
                 # Filter out already-used emails + TH-registered (real account emails)
                 before = len(pool)
-                pool = [e for e in pool if e not in used and e not in _th_emails]
+                pool = [e for e in pool if e not in used]
                 # merge mailg accounts (dedup) — only when no explicit --mails choice
                 if not args.mails:
                     for a in mg:
-                        if a not in pool and a not in used and a not in _th_emails:
+                        if a not in pool and a not in used:
                             pool.append(a)
                     random.shuffle(pool)
                 email_pool = pool if pool else None
-                log(f"Filtered: {len(email_pool or [])} fresh emails available (dropped {before - len(pool)} used/TH-registered)", "warn" if email_pool and len(email_pool) < before * 0.5 else "ok")
+                log(f"Filtered: {len(email_pool or [])} fresh emails available (dropped {before - len(pool)} used)", "warn" if email_pool and len(email_pool) < before * 0.5 else "ok")
         except FileNotFoundError:
             log(f"Email file {args.email_file} not found, will generate new emails")
 
@@ -1160,7 +1153,7 @@ def main():
                 log(f"Using email from pool: {email_to_use}")
         else:
             # pool empty — let pick_fresh_email generate a random one
-            email_to_use = pick_fresh_email([], used, _th_emails)
+            email_to_use = pick_fresh_email([], used)
             if email_to_use:
                 log(f"Using generated email: {email_to_use}")
 
@@ -1181,7 +1174,7 @@ def main():
         
         while attempts < 10:
             if not email_to_use:
-                email_to_use = pick_fresh_email([], used, _th_emails)
+                email_to_use = pick_fresh_email([], used)
                 if not email_to_use:
                     log("No emails available — exhausted")
                     break
