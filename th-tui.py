@@ -1833,7 +1833,10 @@ def create_account(c, email=None, password=None, _retry=True):
     try:
         with sync_playwright() as p:
             launch_kwargs = {"executable_path": "/usr/bin/chromium-browser", "headless": headless,
-                             "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]}
+                             "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+                                      "--disable-features=UseDnsHttpsSvcbAlpn",
+                                      "--host-resolver-rules=MAP * ~NOTFOUND",
+                                      "--disable-ipv6"]}
             b = p.chromium.launch(**launch_kwargs)
             ctx_kwargs = {"viewport": {"width": 1280, "height": 720}}
             if proxy_parsed and pm:

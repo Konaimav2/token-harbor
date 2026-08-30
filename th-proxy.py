@@ -53,8 +53,8 @@ def parse_proxy(raw):
     if m:
         g = m.groupdict()
         proto = (g["proto"] or "http").lower()
-        if proto in ("socks5h",):
-            proto = "socks5"
+        # keep socks5h as socks5h — Chromium local-DNS leaks on plain socks5
+        # socks5h = remote DNS via proxy (upstream resolves); bridge handles auth case
         return proto, g["host"], int(g["port"]), g.get("user"), g.get("pass")
     # Webshare host:port:user:pass (no scheme)
     m2 = PROXY_WEB_RE.match(raw)
