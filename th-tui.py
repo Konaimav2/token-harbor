@@ -1514,6 +1514,49 @@ def _ensure_local_proxy():
         return False
 
 
+def _proxy_id(p):
+    """Stable identity for a proxy entry (used for rate-limit cooldown)."""
+    try:
+        return f"{p[0]}://{p[1]}:{p[2]}" + (f":{p[3]}" if len(p) > 3 and p[3] else "")
+    except Exception:
+        return str(p)
+
+
+def _rl_file():
+    return BASE / "proxy_ratelimit.json"
+
+
+def _load_ratelimited():
+    """Return {proxy_id: ts} for proxies on 1h cooldown (expired purged)."""
+    try:
+        d = json.loads(_rl_file().read_text())
+    except Exception:
+        d = {}
+    now = time.time()
+    keep = {k: v for k, v in d.items() if now - float(v) < 3600}
+    if len(keep) != len(d):
+        try:
+            _rl_file().write_text(json.dumps(keep, indent=2))
+        except Exception:
+            pass
+    return keep
+
+
+def _mark_proxy_ratelimited(proxy_id, ip=""):
+    """Put a proxy on 1h cooldown after backend rate-limit."""
+    try:
+        d = _load_ratelimited()
+        d[proxy_id] = time.time()
+        _rl_file().write_text(json.dumps(d, indent=2))
+    except Exception as e:
+        elog("mark ratelimit: " + str(e))
+    log(f"Proxy rate-limited -> cooldown 1h: {proxy_id}" + (f" (IP: {ip})" if ip else ""), "warn")
+
+
+def _is_ratelimited(proxy_id):
+    return proxy_id in _load_ratelimited()
+
+
 def _next_proxy(c, last=None):
     """Get the next proxy for an account based on proxy config (smart balanced)."""
     pm = _load_proxy_mod()
@@ -1580,10 +1623,14 @@ def _next_proxy(c, last=None):
         random.shuffle(cands)
     else:  # top
         cands = list(proxies)
-    import itertools
+    _rl_now = _load_ratelimited()
     for p in cands[:min(30, len(cands))]:
         # relay proxies (https://*.vercel.app) can't be Playwright socket proxies — skip for browser use
         if p[0] == "relay":
+            continue
+        # skip proxies on 1h rate-limit cooldown
+        if _is_ratelimited(_proxy_id(p)):
+            dlog(f"skip ratelimited proxy: {_proxy_id(p)}")
             continue
         try:
             # use cached check result (from proxy-menu C=Check) when fresh —
@@ -1941,7 +1988,11 @@ def create_account(c, email=None, password=None, _retry=True):
                 "blacklist", "blocked", "suspicious", "invalid email",
                 "email domain not allowed", "temp email", "disposable",
             ]):
-                log("Backend blocked signup — rotating proxy", "warn")
+                _is_net_rl = any(s in body for s in ["too many sign-ups", "sign-ups from this network", "in an hour"])
+                if _is_net_rl and proxy_parsed:
+                    _mark_proxy_ratelimited(_proxy_id(proxy_parsed), c.get("_last_proxy_ip", ""))
+                else:
+                    log("Backend blocked signup — rotating proxy", "warn")
                 b.close()
                 return None  # let run_full_flow retry with different proxy
             else:
