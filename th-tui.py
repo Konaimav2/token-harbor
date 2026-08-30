@@ -1702,10 +1702,12 @@ def _solve_captcha(pg, c, timeout=180):
 def _shot_fail(pg, email):
     """Save a diagnostic screenshot on signup failure."""
     try:
-        _shot = f"/tmp/signup_fail_{email.split('@')[0]}.png"
-        pg.screenshot(path=_shot, full_page=True)
+        _dir = BASE / "debug_shots"
+        _dir.mkdir(exist_ok=True)
+        _shot = _dir / f"signup_fail_{email.split('@')[0]}.png"
+        pg.screenshot(path=str(_shot), full_page=True)
         dlog(f"Screenshot saved: {_shot}")
-        return _shot
+        return str(_shot)
     except Exception:
         return None
 
