@@ -1070,11 +1070,6 @@ def main():
     proxy_list = None
     proxy_usage = {}  # usage count per proxy index
     
-    # Auto-load proxy.txt if no --proxy given (top order default)
-    if not args.proxy:
-        args.proxy_order = getattr(args, "proxy_order", "top") or "top"
-        args.proxy = str(PROXY_LIST)
-    
     if args.proxy:
         import importlib.util
         spec = importlib.util.spec_from_file_location("tp", str(BASE / "th-proxy.py"))
@@ -1274,9 +1269,9 @@ def main():
             log("Waiting 5s...")
             time.sleep(5)
     print(f"\nDone: {ok}/{args.count} webshare accounts, proxies appended to {PROXY_LIST}")
-    _cleanup_vnc(force=args.cleanup_vnc)
-    if args.cleanup_vnc:
-        log("Cleaned up leftover browser/VNC processes", "ok")
+    _cleanup_vnc(force=True if (args.vnc or args.vnc_auto) else args.cleanup_vnc)
+    if args.vnc or args.vnc_auto or args.cleanup_vnc:
+        log("Cleaned up browser/VNC processes", "ok")
     return 0
 
 
@@ -1304,4 +1299,9 @@ if __name__ == "__main__":
         sys.exit(main())
     except KeyboardInterrupt:
         print("\nInterrupted")
+        # tear down VNC stack we started (leave other tooling alone)
+        import subprocess as _sp
+        _sp.run('pkill -f "[c]hromium-browser.*--no-sandbox" ; pkill -f "[X]vfb :99" ; '
+                'pkill -f "[x]11vnc -display :99" ; pkill -f "[w]ebsockify 6080" ; true',
+                shell=True)
         sys.exit(1)
