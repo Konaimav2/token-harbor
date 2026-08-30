@@ -969,45 +969,80 @@ def _solve_paid(api_key, provider):
     return None
 
 
+def _port_open(port, timeout_s=1.5):
+    import socket
+    s = socket.socket()
+    s.settimeout(timeout_s)
+    try:
+        return s.connect_ex(("127.0.0.1", port)) == 0
+    finally:
+        s.close()
+
+
 def _start_vnc_stack():
-    """Ensure Xvfb(:99) + x11vnc + websockify are running for headed mode."""
+    """Ensure Xvfb(:99) + x11vnc(5900) + websockify(6080) are running for headed mode.
+    Non-blocking; each component started only if its port/process is missing."""
     import subprocess as _sp
-    # 1. Xvfb
+    auth_xs = "Phoe9Ceixingie5ahsah7fieruNg2eijujoofoA1apu6uwevuv8ait3ieshahh3ish"
+    os.environ.setdefault("DISPLAY", ":99")
+    # 1. Xvfb — process + display check
     if not (_sp.call("pgrep -x Xvfb >/dev/null 2>&1", shell=True) == 0):
         _sp.Popen(["Xvfb", ":99", "-screen", "0", "1280x900x24", "-nolisten", "tcp"],
                   stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-        time.sleep(2)
-        log("Started Xvfb :99", "ok")
-    os.environ.setdefault("DISPLAY", ":99")
-    # 2. x11vnc
-    if not (_sp.call("pgrep -f 'x11vnc -display :99' >/dev/null 2>&1", shell=True) == 0):
-        vnc_pw = os.environ.get("VNC_PASSWORD", "")
-        cmd = ["x11vnc", "-display", ":99", "-forever", "-shared", "-nopw"]
-        if vnc_pw:
-            cmd += ["-passwdfile", "/dev/stdin"]
-            p = _sp.Popen(cmd, stdin=_sp.PIPE, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-            p.communicate(vnc_pw.encode())
-        else:
-            _sp.Popen(cmd, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-        time.sleep(1)
-        log("Started x11vnc :99", "ok")
-    # 3. websockify noVNC
-    if not (_sp.call("pgrep -f 'websockify' >/dev/null 2>&1", shell=True) == 0):
-        _sp.Popen(["websockify", "--web=/opt/noVNC", "6080", "127.0.0.1:5900"],
+        for _ in range(10):
+            time.sleep(1)
+            if _sp.call("DISPLAY=:99 xdpyinfo >/dev/null 2>&1", shell=True) == 0:
+                break
+        log("Started Xvfb :99", "ok" if _port_open(5900) or _sp.call("pgrep -x Xvfb >/dev/null 2>&1", shell=True) == 0 else "err")
+    # 2. x11vnc — port 5900 check
+    if not _port_open(5900):
+        if not os.path.exists("/run/x11vnc-passwd"):
+            _sp.run('x11vnc -storepasswd "%s" /run/x11vnc-passwd' % auth_xs, shell=True)
+            try:
+                os.chmod("/run/x11vnc-passwd", 0o600)
+            except Exception:
+                pass
+        _sp.Popen(["x11vnc", "-display", ":99", "-forever", "-shared",
+                   "-rfbauth", "/run/x11vnc-passwd", "-rfbport", "5900"],
                   stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-        time.sleep(1)
-        log("Started websockify :6080", "ok")
+        for _ in range(10):
+            time.sleep(1)
+            if _port_open(5900):
+                break
+        log("Started x11vnc :99", "ok" if _port_open(5900) else "err")
+    # 3. websockify noVNC — port 6080 check
+    if not _port_open(6080):
+        web_dir = "/opt/noVNC"
+        if not os.path.isdir(os.path.join(web_dir, "vnc.html")):
+            alt = _sp.getoutput("ls -d /tmp/*noVNC* 2>/dev/null; ls -d /root/*noVNC* 2>/dev/null").strip().split()
+            web_dir = next((d for d in alt if os.path.isdir(os.path.join(d, "vnc.html"))), web_dir)
+        _sp.Popen(["websockify", "--web", web_dir, "6080", "127.0.0.1:5900"],
+                  stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        for _ in range(10):
+            time.sleep(1)
+            if _port_open(6080):
+                break
+        log("Started websockify :6080", "ok" if _port_open(6080) else "err")
+    # connectivity hint (helps diagnose SSH -L failures immediately)
+    try:
+        out = _sp.getoutput("ss -ltn 'sport = :6080' 2>/dev/null | head -1; echo MARKER; ss -ltn 'sport = :5900' 2>/dev/null | head -1")
+        log(f"VNC ports: {out.replace(chr(10), ' | ')}", "info")
+    except Exception:
+        pass
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--count", type=int, default=1)
-    ap.add_argument("--vnc", action="store_true", help="visible browser (manual captcha)")
+    ap.add_argument("--vnc", dest="vnc", action="store_true",
+                    help="visible browser on VNC display; solver runs (use x-relay/header route) — does NOT block on manual captcha")
+    ap.add_argument("--vnc-manual", dest="vnc_manual", action="store_true",
+                    help="visible browser + PAUSE for human captcha solve (manual queue)")
     ap.add_argument("--cleanup-vnc", action="store_true",
                     help="kill leftover Chromium + Xvfb/x11vnc/websockify on exit "
                          "(free the :99 display for run-batch)"),
     ap.add_argument("--vnc-auto", dest="vnc_auto", action="store_true",
-                    help="headed browser on VNC display, FULLY automatic: audio solver -> retry -> rotate; never blocks for a human")
+                    help="alias for --vnc (headed auto captcha solver; never blocks)")
     ap.add_argument("--proxy", default=None, help="proxy for WS registration (optional)")
     ap.add_argument("--captcha-key", default=None)
     ap.add_argument("--captcha-provider", default="2captcha")
@@ -1025,9 +1060,12 @@ def main():
                     help="Rotate to a new proxy after N accounts (0=unlimited/sticky until throttle)")
     args = ap.parse_args()
 
-    # Auto-start Xvfb + VNC stack if headed mode requested (--vnc / --vnc-auto)
-    if args.vnc or args.vnc_auto:
+    # Auto-start Xvfb + VNC stack if headed mode requested (--vnc / --vnc-auto / --vnc-manual)
+    if args.vnc or args.vnc_auto or args.vnc_manual:
         _start_vnc_stack()
+
+    # Map headed flag into create_one's vnc_mode: --vnc and --vnc-auto are both auto (solver), --vnc-manual is the paused queue
+    headed = args.vnc or args.vnc_auto or args.vnc_manual
 
     # Load emails from file if provided
     email_pool = None
@@ -1074,7 +1112,7 @@ def main():
                 log(f"Loaded {len(pool)} emails from {args.email_file}")
                 # Shuffle the pool so we don't always start from the top (randomized order each run)
                 random.shuffle(pool)
-                # Filter out already-used emails + TH-registered (real account emails)
+                # Filter out already-used emails
                 before = len(pool)
                 pool = [e for e in pool if e not in used]
                 # merge mailg accounts (dedup) — only when no explicit --mails choice
@@ -1243,9 +1281,9 @@ def main():
                     log("No emails available — exhausted")
                     break
             
-            r = create_one(args.vnc or args.vnc_auto, proxy_for_this, args.captcha_key,
-                          args.captcha_provider, email=email_to_use,
-                          auto_mode=args.vnc_auto)
+            r = create_one(headed, proxy_for_this, args.captcha_key,
+                           args.captcha_provider, email=email_to_use,
+                           auto_mode=not args.vnc_manual)
             
             status = r[0] if isinstance(r, tuple) else "ERROR"
             if status == "REGISTERED":
