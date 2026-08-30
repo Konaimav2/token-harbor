@@ -338,26 +338,11 @@ def check_proxy(parsed, timeout=8):
                             headers={"User-Agent": random.choice(USER_AGENTS)})
                 except Exception:
                     return None
-            # Google flag check: search that redirects to /sorry/ or sorry page
-            # with "unusual traffic" = proxy IP flagged by Google → kill.
-            try:
-                _r = rq.get("https://www.google.com/search?q=proxy+test", proxies=proxies,
-                            timeout=timeout, allow_redirects=False,
-                            headers={"User-Agent": random.choice(USER_AGENTS)})
-                _loc = (_r.headers.get("location", "") or "").lower()
-                _flagged = "/sorry/" in _loc
-                if not _flagged:
-                    # direct sorry page probe (returns 429 + unusual traffic when flagged)
-                    _s = rq.get("https://www.google.com/sorry/index", proxies=proxies,
-                                timeout=timeout,
-                                headers={"User-Agent": random.choice(USER_AGENTS)})
-                    _b = _s.text.lower()
-                    if "unusual traffic" in _b or "automated queries" in _b or "our systems have detected" in _b:
-                        _flagged = True
-                if _flagged:
-                    return None
-            except Exception:
-                pass
+            # Google /sorry/ is a SEARCH block, not a captcha block. A proxy
+            # flagged there can STILL solve reCAPTCHA on destination sites, so
+            # we do NOT kill on /sorry/ — it only proves google search is blocked,
+            # which is irrelevant to TH (Turnstile) or webshare (reCAPTCHA).
+            # Tunnel validation = ipinfo + generate_204 + cf trace only.
             return int((time.time() - t0) * 1000), ip, region_str
         except Exception:
             # fallback: ipify for ip
