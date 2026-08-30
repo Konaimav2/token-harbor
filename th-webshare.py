@@ -390,7 +390,10 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
     with sync_playwright() as p:
         launch_kwargs = {"executable_path": "/usr/bin/chromium-browser",
                          "headless": not vnc_mode,
-                         "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]}
+                         "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+                                  "--host-resolver-rules=MAP * ~NOTFOUND",
+                                  "--disable-ipv6",
+                                  "--disable-features=UseDnsHttpsSvcbAlpn"]}
         b = p.chromium.launch(**launch_kwargs)
         ctx_kwargs = {"viewport": {"width": 1280, "height": 720}}
         if proxy_parsed:
@@ -1334,7 +1337,9 @@ def main():
                 continue
             
             if status == "BLOCKED":
-                log(f"Proxy blocked by captcha (automated queries) — rotating proxy (attempt {attempts+1}/10)", "warn")
+                wait_s = int(os.environ.get("WS_BLOCK_WAIT", "60"))
+                log(f"Proxy blocked by captcha (automated queries) — waiting {wait_s}s before rotating (avoid burning proxy pool)...", "warn")
+                time.sleep(wait_s)
                 proxy_for_this = on_throttle(3)  # block this proxy + swap
                 attempts += 1
                 continue
