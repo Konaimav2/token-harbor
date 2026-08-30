@@ -280,10 +280,13 @@ def _verify_in_browser(pg, email):
         m.load_env()
         # poll patiently — activation mail often lands 30-90s AFTER signup.
         # Read from BOTH providers: catch-all domains hit cloudmail, MailG-sourced
-        # accounts receive in their gmail inbox.
-        msgs = []
-        deadline = time.time() + 120
+        # accounts receive in their gmail inbox. Poll UNTIL a webshare
+        # activation link is found (ignore unrelated mail like Google notices).
+        _ws_verify = ["dashboard.webshare.io", "proxy.webshare.io", "t.webshare.io", "webshare.io"]
+        url = None
+        deadline = time.time() + 180
         while time.time() < deadline:
+            msgs = []
             try:
                 msgs = m.read_cloudmail_inbox(email) or []
             except Exception:
@@ -293,64 +296,66 @@ def _verify_in_browser(pg, email):
                     msgs = m.read_mailg_inbox(email) or []
                 except Exception:
                     msgs = []
-            if msgs:
+            # scan emails for a webshare activation/verify link
+            for msg in msgs:
+                body = str(msg.get("text", "")) + " " + str(msg.get("html", ""))
+                urls = re.findall(r'https?://[^\s"<>]+', body)
+                for u in urls:
+                    if any(w in u.lower() for w in ["verify", "confirm", "activate"]):
+                        if any(d in u.lower() for d in _ws_verify):
+                            url = u
+                            break
+                if url:
+                    break
+            if url:
                 break
             time.sleep(6)
-        if not msgs:
-            log(f"No verification email for {email} within 2min — banner will persist", "warn")
+        if not url:
+            log(f"No webshare verification link for {email} within 3min", "warn")
             return False
-        for msg in msgs:
-            body = str(msg.get("text", "")) + " " + str(msg.get("html", ""))
-            urls = re.findall(r'https?://[^\s"<>]+', body)
-            # Only match verification links FROM webshare (not TH/other services using same inbox)
-            _ws_verify = ["dashboard.webshare.io", "proxy.webshare.io", "t.webshare.io", "webshare.io"]
-            verify_urls = [u for u in urls if any(w in u.lower() for w in ["verify", "confirm", "activate"])
-                           and any(d in u.lower() for d in _ws_verify)]
-            if verify_urls:
-                url = verify_urls[0]
-                log(f"Verification link found for {email}, opening in browser...", "ok")
-                pg.goto(url, wait_until="domcontentloaded", timeout=30000)
-                try:
-                    pg.wait_for_load_state("networkidle", timeout=20000)
-                except Exception:
-                    pass
-                time.sleep(3)
-                # READ THE OUTCOME — loading the URL is not the same as activating
-                try:
-                    txt = (pg.inner_text("body") or "").lower()
-                except Exception:
-                    txt = ""
-                if any(w in txt for w in ["invalid", "expired", "already been used"]):
-                    log(f"Activation REJECTED for {email}: {txt[:80]}", "warn")
-                    return False
-                if any(w in txt for w in ["verified", "activated", "thank you", "success"]):
-                    log(f"Email VERIFIED for {email}", "ok")
-                    return True
-                # ambiguous — force a dashboard reload; banner state is authoritative there
-                try:
-                    pg.goto("https://dashboard.webshare.io/dashboard/proxy", wait_until="domcontentloaded", timeout=30000)
-                    time.sleep(5)
-                    txt = (pg.inner_text("body") or "").lower()
-                    BANNER_TEXT = "verify your email to ensure your bandwidth isn't limited"
-                    if BANNER_TEXT not in txt:
-                        log(f"Banner gone after reload — {email} verified", "ok")
-                        return True
-                    # banner still present — try clicking verify link again in-dashboard
-                    try:
-                        verify_link = pg.locator("a:has-text('verify'), button:has-text('verify')").first
-                        if verify_link.count():
-                            verify_link.click()
-                            time.sleep(5)
-                            txt2 = (pg.inner_text("body") or "").lower()
-                            if "verify your email" not in txt2 and "bandwidth isn't limited" not in txt2:
-                                log(f"Banner gone after in-dashboard verify click — {email} verified", "ok")
-                                return True
-                    except Exception:
-                        pass
-                    log(f"Banner STILL present for {email} after activation visit", "warn")
-                except Exception as e:
-                    log(f"Dashboard reload check failed: {str(e)[:50]}", "warn")
+        log(f"Verification link found for {email}, opening in browser...", "ok")
+        pg.goto(url, wait_until="domcontentloaded", timeout=30000)
+        try:
+            pg.wait_for_load_state("networkidle", timeout=20000)
+        except Exception:
+            pass
+        time.sleep(3)
+        # READ THE OUTCOME — loading the URL is not the same as activating
+        try:
+            txt = (pg.inner_text("body") or "").lower()
+        except Exception:
+            txt = ""
+        if any(w in txt for w in ["invalid", "expired", "already been used"]):
+            log(f"Activation REJECTED for {email}: {txt[:80]}", "warn")
+            return False
+        if any(w in txt for w in ["verified", "activated", "thank you", "success"]):
+            log(f"Email VERIFIED for {email}", "ok")
+            return True
+        # ambiguous — force a dashboard reload; banner state is authoritative there
+        try:
+            pg.goto("https://dashboard.webshare.io/dashboard/proxy", wait_until="domcontentloaded", timeout=30000)
+            time.sleep(5)
+            txt = (pg.inner_text("body") or "").lower()
+            BANNER_TEXT = "verify your email to ensure your bandwidth isn't limited"
+            if BANNER_TEXT not in txt:
+                log(f"Banner gone after reload — {email} verified", "ok")
                 return True
+            # banner still present — try clicking verify link again in-dashboard
+            try:
+                verify_link = pg.locator("a:has-text('verify'), button:has-text('verify')").first
+                if verify_link.count():
+                    verify_link.click()
+                    time.sleep(5)
+                    txt2 = (pg.inner_text("body") or "").lower()
+                    if "verify your email" not in txt2 and "bandwidth isn't limited" not in txt2:
+                        log(f"Banner gone after in-dashboard verify click — {email} verified", "ok")
+                        return True
+            except Exception:
+                pass
+            log(f"Banner STILL present for {email} after activation visit", "warn")
+        except Exception as e:
+            log(f"Dashboard reload check failed: {str(e)[:50]}", "warn")
+        return True
         return False
     except Exception as e:
         log(f"Verify in browser for {email}: {str(e)[:50]}", "warn")
