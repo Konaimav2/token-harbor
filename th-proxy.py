@@ -328,10 +328,25 @@ def check_proxy(parsed, timeout=8):
             city = j.get("city", "")
             loc = j.get("loc", "")
             region_str = ",".join(x for x in (country, city) if x)
-            # Soft checks only: google/cloudflare/recaptcha failures do NOT kill a proxy.
-            # A proxy valid for the actual target (webshare/tokenharbor) may still be
-            # blocked by Google — hard-failing here nuked the working pool (48 dead).
-            # ipinfo success alone proves the tunnel works.
+            # Hard checks: proxy must reach real sites + not be Google-flagged.
+            # A proxy that passes ipinfo but fails google/cloudflare/recaptcha is
+            # dead or flagged for real browsing — kill it.
+            for _site in ["https://www.google.com", "https://www.cloudflare.com"]:
+                try:
+                    rq.get(_site, proxies=proxies, timeout=timeout,
+                            headers={"User-Agent": random.choice(USER_AGENTS)})
+                except Exception:
+                    return None
+            # check if proxy IP is flagged by Google (reCAPTCHA block page)
+            try:
+                _r = rq.get("https://recaptcha-demo.appspot.com/recaptcha-v3-request-scores.php",
+                            proxies=proxies, timeout=timeout,
+                            headers={"User-Agent": random.choice(USER_AGENTS)})
+                _b = _r.text.lower()
+                if "automated queries" in _b or "unusual traffic" in _b or "blocked" in _b:
+                    return None
+            except Exception:
+                pass
             return int((time.time() - t0) * 1000), ip, region_str
         except Exception:
             # fallback: ipify for ip
