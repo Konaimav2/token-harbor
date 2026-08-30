@@ -574,14 +574,28 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                 time.sleep(1)
             # auto-solve with audio solver first (free — no API key needed)
             if not token:
-                log("Trying audio solver...", "info")
-            try:
-                if _solve_recaptcha_audio(pg):
-                    t = pg.evaluate("() => (window.grecaptcha && grecaptcha.getResponse()) || ''")
-                    if t:
-                        token = t
-            except Exception:
-                pass
+                # Only try the solver IF a reCAPTCHA iframe is actually present.
+                # If no anchor frame appeared, there's no captcha to solve — skip.
+                _has_anchor = False
+                try:
+                    for fr in pg.frames:
+                        u = (fr.url or "")
+                        if "/anchor" in u and "recaptcha" in u:
+                            _has_anchor = True
+                            break
+                except Exception:
+                    _has_anchor = False
+                if not _has_anchor:
+                    log("No reCAPTCHA widget shown — skipping solver (captcha auto-passed/implicit)", "info")
+                else:
+                    log("Trying audio solver...", "info")
+                    try:
+                        if _solve_recaptcha_audio(pg):
+                            t = pg.evaluate("() => (window.grecaptcha && grecaptcha.getResponse()) || ''")
+                            if t:
+                                token = t
+                    except Exception:
+                        pass
             if not token and vnc_mode and auto_mode:
                 # --vnc-auto: VNC stays up as a WITNESS, but nobody will solve.
                 # Rotate proxy immediately instead of blocking on a human.
