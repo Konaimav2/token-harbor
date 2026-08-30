@@ -2076,11 +2076,13 @@ def create_account(c, email=None, password=None, _retry=True):
                 "has already been registered", "email already registered",
                 "already registered", "email already exists", "already been used",
                 "account with this email already",
-                "already on board", "sign in instead", "email is already",
+                "already on board",
             ]):
-                log("Email already registered: " + email, "warn")
+                _api = _api_errors[-1] if _api_errors else 'none'
+                log(f"Email already registered: {email} | api={_api} | page={body[:120]}", "warn")
                 b.close()
                 mark_used(email)  # never pick this address again
+                c["_email_terminal"] = True  # stop retrying this email
                 return None
             elif any(p in body for p in [
                 "couldn't create your account", "try again in a minute",
@@ -2592,6 +2594,10 @@ def run_full_flow(c, email=None, password=None, pm=None, provider_hint=None, ski
         if r:
             dlog(f"Account created for {email}")
             break
+        if c.get("_email_terminal"):
+            c.pop("_email_terminal", None)
+            log(f"{email} terminal (already registered) — moving to next email", "warn")
+            return None
         if c.get("_last_fail_ratelimit"):
             # rate-limited: rotate IMMEDIATELY — retrying same proxy is suspicious
             failed_ip = c.get("_last_proxy_ip")
