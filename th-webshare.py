@@ -399,7 +399,9 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                          "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
                                   "--host-resolver-rules=" + _hrr,
                                   "--disable-ipv6",
-                                  "--disable-features=UseDnsHttpsSvcbAlpn"]}
+                                  "--disable-features=UseDnsHttpsSvcbAlpn",
+                                  "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+                                  "--disable-rtc-smoothness-algorithm"]}
         b = p.chromium.launch(**launch_kwargs)
         ctx_kwargs = {"viewport": {"width": 1280, "height": 720}}
         if proxy_parsed:

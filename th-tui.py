@@ -1843,7 +1843,9 @@ def create_account(c, email=None, password=None, _retry=True):
                              "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
                                       "--disable-features=UseDnsHttpsSvcbAlpn",
                                       "--host-resolver-rules=" + _hrr,
-                                      "--disable-ipv6"]}
+                                      "--disable-ipv6",
+                                      "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+                                      "--disable-rtc-smoothness-algorithm"]}
             b = p.chromium.launch(**launch_kwargs)
             ctx_kwargs = {"viewport": {"width": 1280, "height": 720}}
             if proxy_parsed and pm:
