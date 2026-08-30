@@ -1699,6 +1699,17 @@ def _solve_captcha(pg, c, timeout=180):
     return None
 
 
+def _shot_fail(pg, email):
+    """Save a diagnostic screenshot on signup failure."""
+    try:
+        _shot = f"/tmp/signup_fail_{email.split('@')[0]}.png"
+        pg.screenshot(path=_shot, full_page=True)
+        dlog(f"Screenshot saved: {_shot}")
+        return _shot
+    except Exception:
+        return None
+
+
 def _explain_signup_fail(err_text, url, body_head):
     """Map a raw signup failure to a human-readable explanation."""
     e = (err_text or "").lower()
@@ -1811,6 +1822,7 @@ def create_account(c, email=None, password=None, _retry=True):
                     pg.click('button[type="submit"]', timeout=30000)
             except Exception as e:
                 elog(f"form fill/submit failed: {_explain_signup_fail(str(e), '', '')}")
+                _shot_fail(pg, email)
                 b.close()
                 return None
             # solve Turnstile if present (manual via VNC or headless solver)
@@ -1938,26 +1950,17 @@ def create_account(c, email=None, password=None, _retry=True):
                             on_dashboard = True
                         else:
                             elog(f"signup retry failed: {_explain_signup_fail('', url_now, body[:120])}")
-                            try:
-                                _shot = f"/tmp/signup_fail_{email.split('@')[0]}.png"
-                                pg.screenshot(path=_shot, full_page=True)
-                                dlog(f"Screenshot saved: {_shot}")
-                            except Exception:
-                                pass
+                            _shot_fail(pg, email)
                             b.close()
                             return None
                     except Exception as e:
                         elog(f"signup retry error: {_explain_signup_fail(str(e), '', '')}")
+                        _shot_fail(pg, email)
                         b.close()
                         return None
                 else:
                     elog(f"signup unexpected: {_explain_signup_fail('', url_now, body[:120])}")
-                    try:
-                        _shot = f"/tmp/signup_fail_{email.split('@')[0]}.png"
-                        pg.screenshot(path=_shot, full_page=True)
-                        dlog(f"Screenshot saved: {_shot}")
-                    except Exception:
-                        pass
+                    _shot_fail(pg, email)
                     b.close()
                     return None
     except Exception as e:
