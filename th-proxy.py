@@ -328,6 +328,13 @@ def check_proxy(parsed, timeout=8):
             city = j.get("city", "")
             loc = j.get("loc", "")
             region_str = ",".join(x for x in (country, city) if x)
+            # verify proxy can reach real websites (ipinfo alone is insufficient)
+            for _site in ["https://www.google.com", "https://www.cloudflare.com"]:
+                try:
+                    rq.get(_site, proxies=proxies, timeout=timeout,
+                            headers={"User-Agent": random.choice(USER_AGENTS)})
+                except Exception:
+                    return None
             return int((time.time() - t0) * 1000), ip, region_str
         except Exception:
             # fallback: ipify for ip
