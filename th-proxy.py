@@ -337,13 +337,23 @@ def check_proxy(parsed, timeout=8):
                             headers={"User-Agent": random.choice(USER_AGENTS)})
                 except Exception:
                     return None
-            # check if proxy IP is flagged by Google (reCAPTCHA block page)
+            # Google flag check: search that redirects to /sorry/ or sorry page
+            # with "unusual traffic" = proxy IP flagged by Google → kill.
             try:
-                _r = rq.get("https://recaptcha-demo.appspot.com/recaptcha-v3-request-scores.php",
-                            proxies=proxies, timeout=timeout,
+                _r = rq.get("https://www.google.com/search?q=proxy+test", proxies=proxies,
+                            timeout=timeout, allow_redirects=False,
                             headers={"User-Agent": random.choice(USER_AGENTS)})
-                _b = _r.text.lower()
-                if "automated queries" in _b or "unusual traffic" in _b or "blocked" in _b:
+                _loc = (_r.headers.get("location", "") or "").lower()
+                _flagged = "/sorry/" in _loc
+                if not _flagged:
+                    # direct sorry page probe (returns 429 + unusual traffic when flagged)
+                    _s = rq.get("https://www.google.com/sorry/index", proxies=proxies,
+                                timeout=timeout,
+                                headers={"User-Agent": random.choice(USER_AGENTS)})
+                    _b = _s.text.lower()
+                    if "unusual traffic" in _b or "automated queries" in _b or "our systems have detected" in _b:
+                        _flagged = True
+                if _flagged:
                     return None
             except Exception:
                 pass
