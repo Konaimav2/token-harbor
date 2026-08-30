@@ -1752,7 +1752,7 @@ def _shot_fail(pg, email):
     try:
         _dir = BASE / "debug_shots"
         _dir.mkdir(exist_ok=True)
-        _shot = _dir / f"signup_fail_{email.split('@')[0]}.png"
+        _shot = _dir / f"signup_fail_{email.split('@')[0]}_{int(time.time())}.png"
         pg.screenshot(path=str(_shot), full_page=True)
         log(f"Screenshot saved: {_shot}", "info")
         return str(_shot)
