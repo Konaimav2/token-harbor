@@ -2073,9 +2073,8 @@ def create_account(c, email=None, password=None, _retry=True):
                 b.close()
                 return {"email": email, "password": password, "api_key": api_key, "verified": False}
             elif any(p in body for p in [
-                "has already been registered", "email already registered",
-                "already registered", "email already exists", "already been used",
-                "account with this email already",
+                "has already been registered", "email already exists",
+                "this email is already", "already registered with", "email is already on",
                 "already on board",
             ]):
                 _api = _api_errors[-1] if _api_errors else 'none'
@@ -2085,8 +2084,10 @@ def create_account(c, email=None, password=None, _retry=True):
                 c["_email_terminal"] = True  # stop retrying this email
                 return None
             elif any(p in body for p in [
-                "couldn't create your account", "try again in a minute",
-                "our team has been alerted", "rate limit", "too many requests",
+                "couldn't create your account", "couldn't create your account right now",
+                "can't create your account", "try again in a minute",
+                "our team has been alerted", "support team has been informed",
+                "rate limit", "too many requests",
                 "too many sign-ups", "sign-ups from this network", "in an hour",
                 "blacklist", "blocked", "suspicious", "invalid email",
                 "email domain not allowed", "temp email", "disposable",
