@@ -1991,6 +1991,7 @@ def create_account(c, email=None, password=None, _retry=True):
                 _is_net_rl = any(s in body for s in ["too many sign-ups", "sign-ups from this network", "in an hour"])
                 if _is_net_rl and proxy_parsed:
                     _mark_proxy_ratelimited(_proxy_id(proxy_parsed), c.get("_last_proxy_ip", ""))
+                    c["_last_fail_ratelimit"] = True
                 else:
                     log("Backend blocked signup — rotating proxy", "warn")
                 b.close()
@@ -2485,10 +2486,20 @@ def run_full_flow(c, email=None, password=None, pm=None, provider_hint=None, ski
     max_attempts = 30  # up to 10 proxy rotations × 3 tries each — NEVER give up on the account
     proxy_fail_count = 0
     for attempt in range(1, max_attempts + 1):
+        c.pop("_last_fail_ratelimit", None)
         r = create_account(c, email=email, password=password)
         if r:
             dlog(f"Account created for {email}")
             break
+        if c.get("_last_fail_ratelimit"):
+            # rate-limited: rotate IMMEDIATELY — retrying same proxy is suspicious
+            failed_ip = c.get("_last_proxy_ip")
+            if failed_ip:
+                c.setdefault("_used_proxy_ips", []).append(failed_ip)
+            log(f"Proxy rate-limited, rotating immediately -> retry {email} with new proxy", "warn")
+            proxy_fail_count = 0
+            interruptible_sleep(2)
+            continue
         proxy_fail_count += 1
         if proxy_fail_count >= 3:
             # rotate to next proxy after 3 failures — SAME account kept
