@@ -782,10 +782,15 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
             with open(BASE / "ws_accounts.txt", "a") as f:
                 f.write(f"{email}:{password}:{at}\n")
             # verify in the SAME browser (before close) — opens the link with cookies/session
+            log(f"Starting email verification for {email}...", "info")
             try:
-                _verify_in_browser(pg, email)
+                _verified = _verify_in_browser(pg, email)
+                if _verified:
+                    log(f"Verification complete for {email}", "ok")
+                else:
+                    log(f"Verification pending for {email} — check dashboard manually", "warn")
             except Exception as e:
-                log(f"Verification check skipped: {str(e)[:40]}", "info")
+                log(f"Verification check error: {str(e)[:60]}", "warn")
             try:
                 b.close()
             except Exception:
