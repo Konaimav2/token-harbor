@@ -2076,6 +2076,7 @@ def create_account(c, email=None, password=None, _retry=True):
                 "has already been registered", "email already registered",
                 "already registered", "email already exists", "already been used",
                 "account with this email already",
+                "already on board", "sign in instead", "email is already",
             ]):
                 log("Email already registered: " + email, "warn")
                 b.close()
