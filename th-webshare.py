@@ -388,10 +388,16 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
+        # Host-resolver rule must EXCLUDE the proxy host, else Chromium can't resolve
+        # the proxy itself over http/https (socks5 bridge on 127.0.0.1 is an IP literal,
+        # unaffected by DNS rules).
+        _hrr = "MAP * ~NOTFOUND"
+        if proxy_parsed and proxy_parsed[1]:
+            _hrr += ", EXCLUDE " + proxy_parsed[1]
         launch_kwargs = {"executable_path": "/usr/bin/chromium-browser",
                          "headless": not vnc_mode,
                          "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-                                  "--host-resolver-rules=MAP * ~NOTFOUND",
+                                  "--host-resolver-rules=" + _hrr,
                                   "--disable-ipv6",
                                   "--disable-features=UseDnsHttpsSvcbAlpn"]}
         b = p.chromium.launch(**launch_kwargs)
