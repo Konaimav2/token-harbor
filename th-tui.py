@@ -1699,6 +1699,36 @@ def _solve_captcha(pg, c, timeout=180):
     return None
 
 
+def _explain_signup_fail(err_text, url, body_head):
+    """Map a raw signup failure to a human-readable explanation."""
+    e = (err_text or "").lower()
+    u = (url or "").lower()
+    b = (body_head or "").lower()
+    if "timeout" in e and "button" in e:
+        return "Submit button clicked but no response (backend slow/blocked — proxy may be flagged)"
+    if "timeout" in e and "fill" in e:
+        return "Form field not rendered in time (proxy slow or page blocked)"
+    if "timeout" in e:
+        return "Page operation timed out (proxy slow or unresponsive)"
+    if "proxy" in e:
+        return f"Proxy connection error: {err_text[:80]}"
+    if "couldn't create" in b or "try again in a minute" in b:
+        return "TokenHarbor backend rate-limited signups from this IP — rotating proxy"
+    if "couldn't create" in b or "our team has been alerted" in b:
+        return "TokenHarbor backend rejected signup (IP flagged) — rotating proxy"
+    if "already registered" in b or "already exists" in b:
+        return "Email already registered — marking used"
+    if "blacklist" in b or "blocked" in b or "suspicious" in b:
+        return "Email domain/account blacklisted or flagged as suspicious"
+    if "rate limit" in b or "too many requests" in b:
+        return "Rate limited by TokenHarbor — rotating proxy"
+    if "invalid email" in b or "temp email" in b or "disposable" in b:
+        return "Email rejected as invalid/disposable"
+    if "signup" in u or "signin" in u:
+        return "Stayed on signup page after submit (backend did not accept — proxy IP likely flagged)"
+    return f"Unexpected signup result (url={url} body={body_head[:60]})"
+
+
 def create_account(c, email=None, password=None, _retry=True):
     if c.get("vnc_mode") and not os.environ.get("DISPLAY"):
         os.environ["DISPLAY"] = ":99"
@@ -1780,7 +1810,7 @@ def create_account(c, email=None, password=None, _retry=True):
                     pg.fill('input[name="password"]', password)
                     pg.click('button[type="submit"]', timeout=30000)
             except Exception as e:
-                elog(f"form fill/submit failed: {str(e)[:80]}")
+                elog(f"form fill/submit failed: {_explain_signup_fail(str(e), '', '')}")
                 b.close()
                 return None
             # solve Turnstile if present (manual via VNC or headless solver)
@@ -1907,7 +1937,7 @@ def create_account(c, email=None, password=None, _retry=True):
                             dlog(f"Retry submit succeeded — dashboard reached for {email}")
                             on_dashboard = True
                         else:
-                            elog(f"signup retry failed: url={url_now} body={body[:120]}")
+                            elog(f"signup retry failed: {_explain_signup_fail('', url_now, body[:120])}")
                             try:
                                 _shot = f"/tmp/signup_fail_{email.split('@')[0]}.png"
                                 pg.screenshot(path=_shot, full_page=True)
@@ -1917,11 +1947,11 @@ def create_account(c, email=None, password=None, _retry=True):
                             b.close()
                             return None
                     except Exception as e:
-                        elog(f"signup retry error: {str(e)[:80]}")
+                        elog(f"signup retry error: {_explain_signup_fail(str(e), '', '')}")
                         b.close()
                         return None
                 else:
-                    elog(f"signup unexpected response for {email}: url={url_now} body={body[:120]}")
+                    elog(f"signup unexpected: {_explain_signup_fail('', url_now, body[:120])}")
                     try:
                         _shot = f"/tmp/signup_fail_{email.split('@')[0]}.png"
                         pg.screenshot(path=_shot, full_page=True)
