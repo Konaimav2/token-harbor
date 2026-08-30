@@ -1792,7 +1792,95 @@ def _explain_signup_fail(err_text, url, body_head):
     return f"Unexpected signup result (url={url} body={body_head[:60]})"
 
 
+def _port_open(port, timeout_s=1.5):
+    import socket
+    s = socket.socket()
+    s.settimeout(timeout_s)
+    try:
+        return s.connect_ex(("127.0.0.1", port)) == 0
+    finally:
+        s.close()
+
+
+def _env_vnc_pw():
+    """Read VNC_PASSWORD from <project>/.env (returns '' if unset)."""
+    env_path = BASE / ".env"
+    if not env_path.exists():
+        return ""
+    try:
+        for line in open(env_path):
+            line = line.strip()
+            if line.startswith("VNC_PASSWORD=") and not line.startswith("#"):
+                return line.split("=", 1)[1].strip().strip("'\"")
+    except Exception:
+        pass
+    return ""
+
+
+def _start_vnc_stack():
+    """Ensure Xvfb(:99) + x11vnc(5900) + websockify(6080) are running for headed mode.
+    Non-blocking; each component started only if its port/process is missing."""
+    import subprocess as _sp
+    global VNC_PASSWORD
+    vnc_pw = os.environ.get("VNC_PASSWORD", "") or _env_vnc_pw()
+    if not VNC_PASSWORD:
+        VNC_PASSWORD = vnc_pw  # keep global in sync
+    auth_xs = vnc_pw or "Phoe9Ceixingie5ahsah7fieruNg2eijujoofoA1apu6uwevuv8ait3ieshahh3ish"
+    os.environ.setdefault("DISPLAY", ":99")
+    # 1. Xvfb — process + display check
+    if not (_sp.call("pgrep -x Xvfb >/dev/null 2>&1", shell=True) == 0):
+        _sp.Popen(["Xvfb", ":99", "-screen", "0", "1280x900x24", "-nolisten", "tcp"],
+                  stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        for _ in range(10):
+            time.sleep(1)
+            if _sp.call("DISPLAY=:99 xdpyinfo >/dev/null 2>&1", shell=True) == 0:
+                break
+        log("Started Xvfb :99", "ok" if _port_open(5900) or _sp.call("pgrep -x Xvfb >/dev/null 2>&1", shell=True) == 0 else "err")
+    # 2. x11vnc — port 5900 check
+    if not _port_open(5900):
+        if not os.path.exists("/run/x11vnc-passwd"):
+            _sp.run('x11vnc -storepasswd "%s" /run/x11vnc-passwd' % auth_xs, shell=True)
+            try:
+                os.chmod("/run/x11vnc-passwd", 0o600)
+            except Exception:
+                pass
+        elif os.environ.get("VNC_PASSWORD") or _env_vnc_pw():
+            try:
+                _sp.run('x11vnc -storepasswd "%s" /run/x11vnc-passwd' % auth_xs, shell=True)
+                os.chmod("/run/x11vnc-passwd", 0o600)
+            except Exception:
+                pass
+        _sp.Popen(["x11vnc", "-display", ":99", "-forever", "-shared",
+                   "-rfbauth", "/run/x11vnc-passwd", "-rfbport", "5900"],
+                  stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        for _ in range(10):
+            time.sleep(1)
+            if _port_open(5900):
+                break
+        log("Started x11vnc :99", "ok" if _port_open(5900) else "err")
+    # 3. websockify noVNC — port 6080 check
+    if not _port_open(6080):
+        web_dir = "/opt/noVNC"
+        if not os.path.isdir(os.path.join(web_dir, "vnc.html")):
+            alt = _sp.getoutput("ls -d /tmp/*noVNC* 2>/dev/null; ls -d /root/*noVNC* 2>/dev/null").strip().split()
+            web_dir = next((d for d in alt if os.path.isdir(os.path.join(d, "vnc.html"))), web_dir)
+        _sp.Popen(["websockify", "--web", web_dir, "6080", "127.0.0.1:5900"],
+                  stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        for _ in range(10):
+            time.sleep(1)
+            if _port_open(6080):
+                break
+        log("Started websockify :6080", "ok" if _port_open(6080) else "err")
+    try:
+        out = _sp.getoutput("ss -ltn 'sport = :6080' 2>/dev/null | head -1; echo MARKER; ss -ltn 'sport = :5900' 2>/dev/null | head -1")
+        log(f"VNC ports: {out.replace(chr(10), ' | ')}", "info")
+    except Exception:
+        pass
+
+
 def create_account(c, email=None, password=None, _retry=True):
+    if c.get("vnc_mode"):
+        _start_vnc_stack()
     if c.get("vnc_mode") and not os.environ.get("DISPLAY"):
         os.environ["DISPLAY"] = ":99"
     sys.path.insert(0, str(BASE))
