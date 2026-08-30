@@ -1236,10 +1236,46 @@ def main():
     current_proxy_idx = None   # index into proxy_list
     proxy_blocked = set()      # indices temporarily blocked (throttled)
 
+    # Persistent proxy cooldown (shared across runs, like TUI's proxy_ratelimit.json)
+    WS_BLOCK_FILE = BASE / "ws_blocked.json"
+    _blocked_store = {}
+    try:
+        if WS_BLOCK_FILE.exists():
+            _blocked_store = json.loads(WS_BLOCK_FILE.read_text())
+    except Exception:
+        _blocked_store = {}
+
+    def _pid(parsed):
+        """Stable proxy id (host:port)."""
+        try:
+            return f"{parsed[1]}:{parsed[2]}"
+        except Exception:
+            return ""
+
+    def _is_persist_blocked(parsed):
+        pid = _pid(parsed)
+        ts = _blocked_store.get(pid)
+        if ts is None:
+            return False
+        if time.time() - ts > 3600:  # expired after 1h
+            _blocked_store.pop(pid, None)
+            return False
+        return True
+
+    def _persist_block(parsed):
+        pid = _pid(parsed)
+        if pid:
+            _blocked_store[pid] = time.time()
+            try:
+                WS_BLOCK_FILE.write_text(json.dumps(_blocked_store))
+            except Exception:
+                pass
+
     def _usable_indices():
         if not proxy_list:
             return []
-        return [i for i in range(len(proxy_list)) if i not in proxy_blocked]
+        return [i for i in range(len(proxy_list))
+                if i not in proxy_blocked and not _is_persist_blocked(proxy_list[i][0])]
 
     def _swap_proxy():
         """Pick the next proxy based on ordering. Returns parsed proxy or None."""
@@ -1289,6 +1325,7 @@ def main():
         log(f"Proxy throttled — blocking it and swapping to a fresh one", "warn")
         if current_proxy_idx is not None:
             proxy_blocked.add(current_proxy_idx)
+            _persist_block(proxy_list[current_proxy_idx][0])  # cooldown survives future runs
         # optionally wait out the cooldown so the new proxy isn't rushed (unless --skip-wait-throttle)
         if not skip_throttle_wait:
             time.sleep(min(wait, 30))  # cap wait at 30s so we keep moving
