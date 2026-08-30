@@ -1406,9 +1406,7 @@ def main():
                 continue
             
             if status == "BLOCKED":
-                wait_s = int(os.environ.get("WS_BLOCK_WAIT", "60"))
-                log(f"Proxy blocked by captcha (automated queries) — waiting {wait_s}s before rotating (avoid burning proxy pool)...", "warn")
-                time.sleep(wait_s)
+                log(f"Proxy blocked by captcha (automated queries) — rotating immediately (no wait)", "warn")
                 proxy_for_this = on_throttle(3)  # block this proxy + swap
                 attempts += 1
                 continue
