@@ -1725,6 +1725,8 @@ def _explain_signup_fail(err_text, url, body_head):
         return "Page operation timed out (proxy slow or unresponsive)"
     if "proxy" in e:
         return f"Proxy connection error: {err_text[:80]}"
+    if "too many sign-ups" in b or "from this network" in b or "in an hour" in b:
+        return "TokenHarbor network rate-limit exceeded (this proxy IP used too many signups) — rotating proxy, wait before retry"
     if "couldn't create" in b or "try again in a minute" in b:
         return "TokenHarbor backend rate-limited signups from this IP — rotating proxy"
     if "couldn't create" in b or "our team has been alerted" in b:
@@ -1935,6 +1937,7 @@ def create_account(c, email=None, password=None, _retry=True):
             elif any(p in body for p in [
                 "couldn't create your account", "try again in a minute",
                 "our team has been alerted", "rate limit", "too many requests",
+                "too many sign-ups", "sign-ups from this network", "in an hour",
                 "blacklist", "blocked", "suspicious", "invalid email",
                 "email domain not allowed", "temp email", "disposable",
             ]):
