@@ -580,7 +580,7 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                 # --vnc-auto: VNC stays up as a WITNESS, but nobody will solve.
                 # Rotate proxy immediately instead of blocking on a human.
                 log("Audio solver failed (--vnc-auto) — rotating proxy instead of waiting", "warn")
-                return None
+                return ("BLOCKED", None)
             if not token and vnc_mode:
                 log("Audio solver didn't work — waiting for manual solve in VNC...", "warn")
                 log("  (press Q to skip/rotate this account's proxy)", "info")
@@ -1357,6 +1357,14 @@ def main():
                 used.add(email_to_use)
                 _mark_used(email_to_use)
                 email_to_use = None
+                attempts += 1
+                continue
+
+            # ERROR (None return: captcha unsolved / no token / API fail / exception)
+            # Rotate proxy but KEEP THE SAME EMAIL — proxy-level issue, account not burned.
+            if status == "ERROR":
+                log(f"Registration error — rotating proxy, retrying SAME email (attempt {attempts+1}/10)...", "warn")
+                proxy_for_this = on_throttle(2)
                 attempts += 1
                 continue
             
