@@ -328,7 +328,8 @@ def _verify_in_browser(pg, email):
                     pg.goto("https://dashboard.webshare.io/dashboard/proxy", wait_until="domcontentloaded", timeout=30000)
                     time.sleep(5)
                     txt = (pg.inner_text("body") or "").lower()
-                    if "verify your email" not in txt:
+                    BANNER_TEXT = "verify your email to ensure your bandwidth isn't limited"
+                    if BANNER_TEXT not in txt:
                         log(f"Banner gone after reload — {email} verified", "ok")
                         return True
                     # banner still present — try clicking verify link again in-dashboard
@@ -338,7 +339,7 @@ def _verify_in_browser(pg, email):
                             verify_link.click()
                             time.sleep(5)
                             txt2 = (pg.inner_text("body") or "").lower()
-                            if "verify your email" not in txt2:
+                            if "verify your email" not in txt2 and "bandwidth isn't limited" not in txt2:
                                 log(f"Banner gone after in-dashboard verify click — {email} verified", "ok")
                                 return True
                     except Exception:
@@ -475,27 +476,27 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
             _human_click = _hz.human_click
             
             # Natural pause after page load
-            _hz.rand_delay(1.5, 3.0)
+            _hz.rand_delay(3.0, 6.0)
             # Wander mouse around page before interacting
-            _hz.rand_delay(0.3, 0.6)
+            _hz.rand_delay(1.0, 2.0)
             pg.mouse.move(random.randint(200, 500), random.randint(200, 400))
-            _hz.rand_delay(0.5, 1.0)
+            _hz.rand_delay(1.5, 3.0)
 
             # Fill email with human-like typing (curved mouse + variable speed + typos)
             em = pg.locator("#email-input, input[type='email']").first
             _human_click(pg, em)
-            _hz.rand_delay(0.3, 0.6)
+            _hz.rand_delay(0.5, 1.2)
             _human_type(pg, em, email)
-            _hz.rand_delay(0.8, 1.5)
+            _hz.rand_delay(1.5, 3.0)
 
             # Wander to password field area
             pw = pg.locator("input[type='password']").first
             pg.mouse.move(random.randint(200, 500), random.randint(300, 500))
-            _hz.rand_delay(0.4, 0.8)
-            _human_click(pg, pw)
-            _hz.rand_delay(0.3, 0.6)
-            _human_type(pg, pw, password)
             _hz.rand_delay(1.0, 2.0)
+            _human_click(pg, pw)
+            _hz.rand_delay(0.5, 1.2)
+            _human_type(pg, pw, password)
+            _hz.rand_delay(2.0, 4.0)
 
             # Check ToS checkbox — use frame-based selector for reCAPTCHA Enterprise
             try:
@@ -505,7 +506,7 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                         cb = fr.locator("input[type='checkbox']").first
                         if cb.count() and cb.is_visible():
                             _human_click(pg, cb)
-                            _hz.rand_delay(0.5, 1.0)
+                            _hz.rand_delay(1.0, 2.0)
                             _toS_checked = True
                             break
                     except Exception:
@@ -514,13 +515,13 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                     cb = pg.locator("input[type='checkbox']").first
                     if cb.count():
                         _human_click(pg, cb)
-                        _hz.rand_delay(0.5, 1.0)
+                        _hz.rand_delay(1.0, 2.0)
             except Exception:
                 pass
 
             # Pause before submit — looks natural
             pg.mouse.move(random.randint(100, 600), random.randint(100, 400))
-            _hz.rand_delay(1.5, 3.0)
+            _hz.rand_delay(2.0, 4.0)
 
             # Submit
             submit_btn = pg.locator("button[type='submit']").first
