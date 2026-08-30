@@ -447,6 +447,21 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                     break
                 except Exception as e:
                     log(f"Navigate attempt {attempt}/3 failed: {str(e)[:40]}", "warn")
+                    # Timeout/tunnel isn't necessarily a dead proxy — the page may
+                    # have actually rendered. Wait for the form before giving up;
+                    # killing based on an early DOM probe nuked live proxies.
+                    try:
+                        pg.wait_for_selector(
+                            "#email-input, input[type='email'], input[type='password'], button[type='submit']",
+                            state="visible", timeout=15000)
+                        probe = pg.locator("#email-input, input[type='email'], input[type='password'], button[type='submit']").count()
+                        url_now = pg.url or ""
+                        if probe > 0 and ("register" in url_now or "signup" in url_now):
+                            log(f"  ...page actually loaded (form present, {probe} elms) — continuing", "info")
+                            nav_ok = True
+                            break
+                    except Exception:
+                        pass
                     if attempt < 3:
                         time.sleep(2)
             if not nav_ok:
