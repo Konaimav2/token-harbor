@@ -2409,18 +2409,19 @@ def _test_key(key, model="deepseek-v4-flash:free"):
                 print(f"[swallow th-tui.py:2366] {_e}")
                 pass
     def _req(method, path, body=None):
-        # relay: call relay ROOT, x-relay-target = full upstream URL incl path
+        # relay: 9router format — x-relay-target = base only, x-relay-path = path+query
         headers = {"Authorization": f"Bearer {key}"}
         if body is not None:
             headers["Content-Type"] = "application/json"
         kw = dict(headers=headers, proxies=proxies, timeout=20)
         if body is not None:
             kw["json"] = body
-        # try relay first; fall back to direct if relay fails (relay currently 500 FUNCTION_INVOCATION_FAILED)
+        # try relay first; fall back to direct if relay fails
         if relay:
             try:
                 rh = dict(headers)
-                rh["x-relay-target"] = target + path
+                rh["x-relay-target"] = target  # base only, no path
+                rh["x-relay-path"] = path      # path+query
                 r = requests.request(method, relay, **{**kw, "headers": rh})
                 if r.status_code >= 500 or "FUNCTION_INVOCATION_FAILED" in r.text[:100]:
                     raise RuntimeError("relay failed")
