@@ -2288,6 +2288,17 @@ def load_keys():
     return keys
 
 
+def _save_keys(keys):
+    """Persist keys list back to KEYS_FILE (email|password|api_key|status)."""
+    try:
+        KEYS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(KEYS_FILE, "w") as f:
+            for rec in keys:
+                f.write(f"{rec['email']}|{rec.get('password','')}|{rec.get('api_key','')}|{rec.get('status','pending')}\n")
+    except Exception as e:
+        elog(f"save keys: {e}")
+
+
 def _key_fingerprint(key):
     """Stable non-secret fingerprint used to invalidate stale health cache entries."""
     if not key:
@@ -3191,6 +3202,12 @@ def menu_tokens():
                     "unused": ("UNUSED", DI),
                 }.get(ast, ("?", DI))
                 account = f"{account_color}{account_plain:<6}{RS}"
+                # override account label from real key health (403→UNVER, 200→VER)
+                hs = _cached_key_state(rec, checks)
+                if hs == "forbidden" and account_plain == "VER":
+                    account = f"{Y}UNVER {RS}"
+                elif hs == "live" and account_plain == "UNVER":
+                    account = f"{G}VER   {RS}"
 
                 hs = _cached_key_state(rec, checks)
                 health_plain, health_color = {
@@ -3292,6 +3309,15 @@ def menu_tokens():
                         "reason": str(why)[:160],
                         "checked_at": int(time.time()),
                     }
+                    # persist account status to keys.txt (403→unverified, live→verified)
+                    st = _classify_key_check(works, why)
+                    cur = rec.get("status", "pending")
+                    if st == "forbidden" and cur != "unverified":
+                        rec["status"] = "unverified"
+                        _save_keys(keys)
+                    elif st == "live" and cur != "verified":
+                        rec["status"] = "verified"
+                        _save_keys(keys)
 
             save_key_checks(checks)
             state_counts = {m: 0 for m in ("live", "ratelimited", "planlimited", "invalid", "forbidden", "failed")}
