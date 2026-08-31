@@ -2416,7 +2416,7 @@ def _test_key(key, model="deepseek-v4-flash:free"):
         kw = dict(headers=headers, proxies=proxies, timeout=20)
         if body is not None:
             kw["json"] = body
-        # try relay first; fall back to direct if relay fails (POST often breaks)
+        # try relay first; fall back to direct if relay fails (relay currently 500 FUNCTION_INVOCATION_FAILED)
         if relay:
             try:
                 rh = dict(headers)
@@ -2428,7 +2428,14 @@ def _test_key(key, model="deepseek-v4-flash:free"):
             except Exception as _e:
                 print(f"[swallow th-tui.py:2417] {_e}")
                 pass  # fall through to direct
-        return requests.request(method, target + path, **kw)
+        # direct with 429 retry (parallel checks hit TH rate limit)
+        for attempt in range(2):
+            r = requests.request(method, target + path, **kw)
+            if r.status_code == 429 and attempt == 0:
+                time.sleep(2)
+                continue
+            return r
+        return r
 
     def _is_json_resp(r):
         ct = r.headers.get("content-type", "")
