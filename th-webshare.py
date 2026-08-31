@@ -61,7 +61,8 @@ def _load_mail_servers():
     try:
         cfg = json.loads((BASE / "config.json").read_text())
         return cfg.get("mail_servers", []) or []
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-webshare.py:64] {_e}")
         return []
 
 
@@ -95,7 +96,8 @@ def _real_name_email(domain):
         if not any(ch.isdigit() for ch in pfx):
             pfx += str(_r.randint(11, 999))
         return f"{pfx}@{domain}"
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-webshare.py:98] {_e}")
         return None
 
 
@@ -183,7 +185,8 @@ def gen_email():
         spec.loader.exec_module(m)
         prefix = m._real_prefix({})
         return f"{prefix}@outlook.com"
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-webshare.py:186] {_e}")
         import random, string
         return "".join(random.choices(string.ascii_lowercase, k=8)) + "@outlook.com"
 
@@ -216,7 +219,8 @@ def _mark_used(email):
         try:
             if email in set(WS_USED_FILE.read_text().splitlines()):
                 return
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-webshare.py:219] {_e}")
             pass
     with open(WS_USED_FILE, "a") as f:
         f.write(email + "\n")
@@ -289,12 +293,14 @@ def _verify_in_browser(pg, email):
             msgs = []
             try:
                 msgs = m.read_cloudmail_inbox(email) or []
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-webshare.py:293] {_e}")
                 msgs = []
             if not msgs:
                 try:
                     msgs = m.read_mailg_inbox(email) or []
-                except Exception:
+                except Exception as _e:
+                    print(f"[swallow th-webshare.py:298] {_e}")
                     msgs = []
             # scan emails for a webshare activation/verify link
             for msg in msgs:
@@ -317,13 +323,15 @@ def _verify_in_browser(pg, email):
         pg.goto(url, wait_until="domcontentloaded", timeout=30000)
         try:
             pg.wait_for_load_state("networkidle", timeout=20000)
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-webshare.py:320] {_e}")
             pass
         time.sleep(3)
         # READ THE OUTCOME — loading the URL is not the same as activating
         try:
             txt = (pg.inner_text("body") or "").lower()
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-webshare.py:328] {_e}")
             txt = ""
         if any(w in txt for w in ["invalid", "expired", "already been used"]):
             log(f"Activation REJECTED for {email}: {txt[:80]}", "warn")
@@ -350,7 +358,8 @@ def _verify_in_browser(pg, email):
                     if "verify your email" not in txt2 and "bandwidth isn't limited" not in txt2:
                         log(f"Banner gone after in-dashboard verify click — {email} verified", "ok")
                         return True
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-webshare.py:353] {_e}")
                 pass
             log(f"Banner STILL present for {email} after activation visit", "warn")
         except Exception as e:
@@ -460,7 +469,8 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                             log(f"  ...page actually loaded (form present, {probe} elms) — continuing", "info")
                             nav_ok = True
                             break
-                    except Exception:
+                    except Exception as _e:
+                        print(f"[swallow th-webshare.py:463] {_e}")
                         pass
                     if attempt < 3:
                         time.sleep(2)
@@ -468,7 +478,8 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                 log(f"Navigation failed 3x — proxy likely dead/blocked, rotating", "warn")
                 try:
                     b.close()
-                except Exception:
+                except Exception as _e:
+                    print(f"[swallow th-webshare.py:471] {_e}")
                     pass
                 return ("BLOCKED", None)
 
@@ -477,18 +488,21 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
             try:
                 pg.wait_for_selector("#email-input, input[type='email']", state="visible", timeout=30000)
                 form_ok = True
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-webshare.py:485] {_e}")
                 try:
                     pg.wait_for_selector("button[type='submit'], input[type='email'], input[type='password']",
                                          state="visible", timeout=45000)
                     form_ok = True
-                except Exception:
+                except Exception as _e:
+                    print(f"[swallow th-webshare.py:490] {_e}")
                     form_ok = False
             if not form_ok:
                 log(f"Register form never loaded (page broken/slow) — rotating proxy", "warn")
                 try:
                     b.close()
-                except Exception:
+                except Exception as _e:
+                    print(f"[swallow th-webshare.py:491] {_e}")
                     pass
                 return ("BLOCKED", None)
 
@@ -535,14 +549,16 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                             _hz.rand_delay(1.0, 2.0)
                             _toS_checked = True
                             break
-                    except Exception:
+                    except Exception as _e:
+                        print(f"[swallow th-webshare.py:538] {_e}")
                         pass
                 if not _toS_checked:
                     cb = pg.locator("input[type='checkbox']").first
                     if cb.count():
                         _human_click(pg, cb)
                         _hz.rand_delay(1.0, 2.0)
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-webshare.py:545] {_e}")
                 pass
 
             # Pause before submit — looks natural
@@ -558,7 +574,8 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
             # Wait for page to settle after submit (domcontentloaded, not networkidle)
             try:
                 pg.wait_for_load_state("domcontentloaded", timeout=45000)
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-webshare.py:561] {_e}")
                 pass
             time.sleep(2)  # let the result render
 
@@ -574,7 +591,8 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                                                "invalid email", "different email", "does not support",
                                                "already in use", "already taken"]):
                         break
-                except Exception:
+                except Exception as _e:
+                    print(f"[swallow th-webshare.py:577] {_e}")
                     pass
                 time.sleep(1)
             try:
@@ -586,7 +604,8 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                     log(f"Blocked page detected on this proxy (post-submit) — rotating...", "warn")
                     try:
                         b.close()
-                    except Exception:
+                    except Exception as _e:
+                        print(f"[swallow th-webshare.py:589] {_e}")
                         pass
                     return ("BLOCKED", None)
                 if any(w in body for w in ["already registered", "already exists", "already in use",
@@ -596,7 +615,8 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                     _mark_used(email)
                     try:
                         b.close()
-                    except Exception:
+                    except Exception as _e:
+                        print(f"[swallow th-webshare.py:599] {_e}")
                         pass
                     return ("REGISTERED", None)
                 if any(w in body for w in ["cannot be used", "not a valid email", "invalid email",
@@ -605,10 +625,12 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                     _mark_used(email)
                     try:
                         b.close()
-                    except Exception:
+                    except Exception as _e:
+                        print(f"[swallow th-webshare.py:608] {_e}")
                         pass
                     return ("REGISTERED", None)  # treat as unusable, retry with fresh
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-webshare.py:611] {_e}")
                 pass
 
             # SOLVE CAPTCHA
@@ -618,7 +640,8 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
             for _w in range(10):
                 try:
                     t0 = pg.evaluate("() => (window.grecaptcha && grecaptcha.getResponse()) || ''")
-                except Exception:
+                except Exception as _e:
+                    print(f"[swallow th-webshare.py:635] {_e}")
                     t0 = ""
                 if t0:
                     log("Captcha auto-passed (invisible Enterprise) — token ready", "ok")
@@ -636,7 +659,8 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                         if "/anchor" in u and "recaptcha" in u:
                             _has_anchor = True
                             break
-                except Exception:
+                except Exception as _e:
+                    print(f"[swallow th-webshare.py:653] {_e}")
                     _has_anchor = False
                 if not _has_anchor:
                     log("No reCAPTCHA widget shown — skipping solver (captcha auto-passed/implicit)", "info")
@@ -647,7 +671,8 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                             t = pg.evaluate("() => (window.grecaptcha && grecaptcha.getResponse()) || ''")
                             if t:
                                 token = t
-                    except Exception:
+                    except Exception as _e:
+                        print(f"[swallow th-webshare.py:650] {_e}")
                         pass
             if not token and vnc_mode and auto_mode:
                 # --vnc-auto: VNC stays up as a WITNESS, but nobody will solve.
@@ -669,10 +694,12 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                                 _mark_used(email)
                                 try:
                                     b.close()
-                                except Exception:
+                                except Exception as _e:
+                                    print(f"[swallow th-webshare.py:672] {_e}")
                                     pass
                                 return ("SKIP", None)
-                    except Exception:
+                    except Exception as _e:
+                        print(f"[swallow th-webshare.py:675] {_e}")
                         pass
                     try:
                         # detect Google "automated queries" block — rotate proxy instead of waiting
@@ -680,11 +707,13 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                         _html = ""
                         try:
                             _txt = pg.inner_text("body", timeout=2000).lower() if pg else ""
-                        except Exception:
+                        except Exception as _e:
+                            print(f"[swallow th-webshare.py:683] {_e}")
                             pass
                         try:
                             _html = pg.content().lower() if pg else ""
-                        except Exception:
+                        except Exception as _e:
+                            print(f"[swallow th-webshare.py:687] {_e}")
                             pass
                         _all = _txt + " " + _html
                         if any(w in _all for w in [
@@ -695,7 +724,8 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                             log(f"Blocked page detected on this proxy — rotating...", "warn")
                             try:
                                 b.close()
-                            except Exception:
+                            except Exception as _e:
+                                print(f"[swallow th-webshare.py:698] {_e}")
                                 pass
                             return ("BLOCKED", None)
                         # email rejected (cannot be used / invalid) — mark used + retry fresh
@@ -707,17 +737,20 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                             _mark_used(email)
                             try:
                                 b.close()
-                            except Exception:
+                            except Exception as _e:
+                                print(f"[swallow th-webshare.py:710] {_e}")
                                 pass
                             return ("REGISTERED", None)
-                    except Exception:
+                    except Exception as _e:
+                        print(f"[swallow th-webshare.py:713] {_e}")
                         pass
                     try:
                         t = pg.evaluate("() => (window.grecaptcha && grecaptcha.getResponse()) || ''")
                         if t:
                             token = t
                             break
-                    except Exception:
+                    except Exception as _e:
+                        print(f"[swallow th-webshare.py:720] {_e}")
                         pass
                     time.sleep(2)
             elif captcha_key:
@@ -730,7 +763,8 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                         t = pg.evaluate("() => (window.grecaptcha && grecaptcha.getResponse()) || ''")
                         if t:
                             token = t
-                except Exception:
+                except Exception as _e:
+                    print(f"[swallow th-webshare.py:733] {_e}")
                     pass
             if not token:
                 log("Captcha not solved — account abandoned")
@@ -813,14 +847,16 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                 log(f"Verification check error: {str(e)[:60]}", "warn")
             try:
                 b.close()
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-webshare.py:816] {_e}")
                 pass
             return (email, added)
         except Exception as e:
             log(f"Error: {str(e)[:100]}")
             try:
                 b.close()
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-webshare.py:823] {_e}")
                 pass
             return None
 
@@ -914,7 +950,8 @@ def _solve_recaptcha_audio(pg, max_attempts=4):
                     if loc.count():
                         ab = loc
                         break
-                except Exception:
+                except Exception as _e:
+                    print(f"[swallow th-webshare.py:917] {_e}")
                     continue
             if ab is not None:
                 try:
@@ -941,7 +978,8 @@ def _solve_recaptcha_audio(pg, max_attempts=4):
                     if s2:
                         src = s2
                         break
-                except Exception:
+                except Exception as _e:
+                    print(f"[swallow th-webshare.py:944] {_e}")
                     continue
             if not src:
                 _dbg = bf.evaluate("""() => {
@@ -995,7 +1033,8 @@ def _solve_recaptcha_audio(pg, max_attempts=4):
                         v = fr.locator("#recaptcha-verify-button").first
                         vb = v if v.count() else None
                         break
-                except Exception:
+                except Exception as _e:
+                    print(f"[swallow th-webshare.py:998] {_e}")
                     continue
             if inp is None:
                 log(f"Audio solve {attempt}: #audio-response missing", "info")
@@ -1045,7 +1084,8 @@ def _solve_paid(api_key, provider):
                 return j2["request"]
             if "CAPCHA_NOT_READY" not in str(j2.get("request", "")):
                 return None
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-webshare.py:1048] {_e}")
         pass
     return None
 
@@ -1070,7 +1110,8 @@ def _env_vnc_pw():
             line = line.strip()
             if line.startswith("VNC_PASSWORD=") and not line.startswith("#"):
                 return line.split("=", 1)[1].strip().strip("'\"")
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-webshare.py:1073] {_e}")
         pass
     return ""
 
@@ -1105,14 +1146,16 @@ def _start_vnc_stack():
             _sp.run('x11vnc -storepasswd "%s" /run/x11vnc-passwd' % auth_xs, shell=True)
             try:
                 os.chmod("/run/x11vnc-passwd", 0o600)
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-webshare.py:1108] {_e}")
                 pass
         elif os.environ.get("VNC_PASSWORD") or _env_vnc_pw():
             # refresh stored passwd to match .env (avoids stale/old pw)
             try:
                 _sp.run('x11vnc -storepasswd "%s" /run/x11vnc-passwd' % auth_xs, shell=True)
                 os.chmod("/run/x11vnc-passwd", 0o600)
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-webshare.py:1115] {_e}")
                 pass
         _sp.Popen(["x11vnc", "-display", ":99", "-forever", "-shared",
                    "-rfbauth", "/run/x11vnc-passwd", "-rfbport", "5900"],
@@ -1139,7 +1182,8 @@ def _start_vnc_stack():
     try:
         out = _sp.getoutput("ss -ltn 'sport = :6080' 2>/dev/null | head -1; echo MARKER; ss -ltn 'sport = :5900' 2>/dev/null | head -1")
         log(f"VNC ports: {out.replace(chr(10), ' | ')}", "info")
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-webshare.py:1142] {_e}")
         pass
 
 
@@ -1186,7 +1230,8 @@ def main():
     try:
         _bl = {line.strip().lower() for line in open(BASE / "email-blacklist.txt") if line.strip() and "@" in line}
         used |= _bl
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-webshare.py:1189] {_e}")
         pass
     # MailG accounts (gmail-inbox :8790) join the pool alongside the catch-all file.
     # Real Gmail inboxes receive webshare verification mail reliably; the verify step
@@ -1301,17 +1346,20 @@ def main():
     try:
         if WS_BLOCK_FILE.exists():
             _blocked_store = json.loads(WS_BLOCK_FILE.read_text())
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-webshare.py:1339] {_e}")
         _blocked_store = {}
 
     def _pid(parsed):
         """Stable proxy id — same format as TUI's _proxy_id."""
         try:
             return f"{parsed[0]}://{parsed[1]}:{parsed[2]}" + (f":{parsed[3]}" if len(parsed) > 3 and parsed[3] else "")
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-webshare.py:1346] {_e}")
             try:
                 return f"{parsed[1]}:{parsed[2]}"
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-webshare.py:1349] {_e}")
                 return ""
 
     def _is_persist_blocked(parsed):
@@ -1321,13 +1369,15 @@ def main():
             return False
         try:
             ts = float(ts)
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-webshare.py:1359] {_e}")
             return False
         if time.time() - ts > 3600:  # expired after 1h
             _blocked_store.pop(pid, None)
             try:
                 WS_BLOCK_FILE.write_text(json.dumps(_blocked_store, indent=2))
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-webshare.py:1330] {_e}")
                 pass
             return False
         return True
@@ -1338,7 +1388,8 @@ def main():
             _blocked_store[pid] = time.time()
             try:
                 WS_BLOCK_FILE.write_text(json.dumps(_blocked_store, indent=2))
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-webshare.py:1341] {_e}")
                 pass
 
     def _usable_indices():
@@ -1377,7 +1428,8 @@ def main():
         user = current_proxy[3] or ""
         try:
             ip = socket.gethostbyname(host)
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-webshare.py:1417] {_e}")
             ip = host
         user_str = f" ({user})" if user else ""
         log(f"Swapped to proxy[{best}]: {host}:{port}{user_str} (IP: {ip}, used {proxy_usage[best]}x, order={proxy_order})")
@@ -1430,7 +1482,8 @@ def main():
             _user = proxy_for_this[3] or ""
             try:
                 _ip = socket.gethostbyname(_host)
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-webshare.py:1470] {_e}")
                 _ip = _host
             _u_str = f" ({_user})" if _user else ""
             log(f"Using proxy: {_host}:{_port}{_u_str} (IP: {_ip})")

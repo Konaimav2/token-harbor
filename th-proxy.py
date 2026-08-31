@@ -111,7 +111,8 @@ def _spawn_http_bridge(parsed, timeout=20):
         lp = ("http", "127.0.0.1", local_port, None, None)
         _bridges[key] = lp
         return lp
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-proxy.py:114] {_e}")
         return None
 
 
@@ -124,7 +125,8 @@ def _bridge_loop(server, upstream, timeout):
         except Exception:
             try:
                 server.close()
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-proxy.py:127] {_e}")
                 pass
             return
 
@@ -169,14 +171,17 @@ def _bridge_handle(client, upstream, timeout):
                     _relay(client, up)
                 else:
                     client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-proxy.py:173] {_e}")
                 client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-proxy.py:174] {_e}")
         pass
     finally:
         try:
             client.close()
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-proxy.py:179] {_e}")
             pass
 
 
@@ -194,7 +199,8 @@ def _socks_connect(upstream, host, port, timeout):
     except Exception:
         try:
             s.close()
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-proxy.py:197] {_e}")
             pass
         return None
 
@@ -211,7 +217,8 @@ def _relay(a, b):
                 if not d:
                     return
                 (b if s is a else a).sendall(d)
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-proxy.py:218] {_e}")
                 return
 
 
@@ -281,7 +288,8 @@ def _ensure_requests_socks():
         if spec and spec.loader:
             m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
             m.ensure("proxy_check", auto=True)
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-proxy.py:284] {_e}")
         pass
 
 
@@ -301,7 +309,8 @@ def check_proxy(parsed, timeout=8):
             if r.status_code == 400:  # relay replies 400 when x-relay-target missing — it's alive
                 return int((time.time() - t0) * 1000), "relay", ""
             return None
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-proxy.py:309] {_e}")
             return None
     if proto not in ("http", "https", "socks5"):
         return None
@@ -336,7 +345,8 @@ def check_proxy(parsed, timeout=8):
                 try:
                     rq.get(_site, proxies=proxies, timeout=timeout,
                             headers={"User-Agent": random.choice(USER_AGENTS)})
-                except Exception:
+                except Exception as _e:
+                    print(f"[swallow th-proxy.py:344] {_e}")
                     return None
             # Google /sorry/ is a SEARCH block, not a captcha block. A proxy
             # flagged there can STILL solve reCAPTCHA on destination sites, so
@@ -344,13 +354,15 @@ def check_proxy(parsed, timeout=8):
             # which is irrelevant to TH (Turnstile) or webshare (reCAPTCHA).
             # Tunnel validation = ipinfo + generate_204 + cf trace only.
             return int((time.time() - t0) * 1000), ip, region_str
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-proxy.py:352] {_e}")
             # fallback: ipify for ip
             r = rq.get("https://api.ipify.org?format=json", proxies=proxies,
                        timeout=timeout, headers={"User-Agent": random.choice(USER_AGENTS)})
             ip = r.json().get("ip", "")
             return int((time.time() - t0) * 1000), ip, ""
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-proxy.py:358] {_e}")
         try:
             r = rq.get("http://ip-api.com/json", proxies=proxies,
                        timeout=timeout, headers={"User-Agent": random.choice(USER_AGENTS)})
@@ -360,7 +372,8 @@ def check_proxy(parsed, timeout=8):
             city = j.get("city", "")
             region_str = ",".join(x for x in (cc, city) if x)
             return int((time.time() - t0) * 1000), ip, region_str
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-proxy.py:368] {_e}")
             return None
 
 
@@ -377,7 +390,8 @@ def check_proxies(proxies=None, timeout=8):
             p = futs[fut]
             try:
                 r = fut.result()
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-proxy.py:385] {_e}")
                 r = None
             if r:
                 # r = (latency, ip, region)
@@ -404,7 +418,8 @@ def load_protected_from_config():
                     parts = entry.split("|")
                     if len(parts) >= 4:
                         prot.add(f"{parts[1]}:{parts[2]}:{parts[3]}")
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-proxy.py:407] {_e}")
         pass
     return prot
 
@@ -452,7 +467,8 @@ def load_check_cache():
     try:
         if PROXY_CHECK_CACHE_FILE.exists():
             return _json.loads(PROXY_CHECK_CACHE_FILE.read_text())
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-proxy.py:455] {_e}")
         pass
     return {}
 
@@ -460,7 +476,8 @@ def load_check_cache():
 def save_check_cache(cache):
     try:
         PROXY_CHECK_CACHE_FILE.write_text(_json.dumps(cache))
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-proxy.py:463] {_e}")
         pass
 
 
@@ -499,7 +516,8 @@ def load_usage():
     try:
         if PROXY_USE_FILE.exists():
             return _json.loads(PROXY_USE_FILE.read_text())
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-proxy.py:502] {_e}")
         pass
     return {}
 
@@ -507,7 +525,8 @@ def load_usage():
 def save_usage(usage):
     try:
         PROXY_USE_FILE.write_text(_json.dumps(usage))
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-proxy.py:510] {_e}")
         pass
 
 
@@ -599,7 +618,8 @@ def scrape_proxies(limit=100, timeout=15):
                     p = parse_proxy(line)
                     if p:
                         found.append(p)
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-proxy.py:602] {_e}")
             continue
         if len(found) >= limit:
             break
@@ -634,7 +654,8 @@ def get_public_tempmail():
             "address": addr, "password": "THtmp2026!"}, timeout=10)
         if r2.status_code in (200, 201):
             return addr
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-proxy.py:637] {_e}")
         pass
     return None
 
@@ -663,7 +684,8 @@ def read_public_tempmail(email, password="THtmp2026!", wait=60, interval=5):
                     if r3.status_code == 200:
                         return r3.json()
             time.sleep(interval)
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-proxy.py:666] {_e}")
         pass
     return None
 
@@ -702,7 +724,8 @@ def read_1secmail(email, wait=60, interval=5):
                     if r2.status_code == 200:
                         return r2.json()
             time.sleep(interval)
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-proxy.py:705] {_e}")
         pass
     return None
 
@@ -741,7 +764,8 @@ def vpngate_snapshot():
             })
         nodes.sort(key=lambda n: n["ping"])
         return nodes
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-proxy.py:758] {_e}")
         return []
 
 
@@ -846,7 +870,8 @@ def create_tempmail(provider=None):
             addr = creator()
             if addr:
                 return name, addr
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-proxy.py:849] {_e}")
             continue
     return None, None
 
@@ -874,7 +899,8 @@ def get_tempmail_from_pool():
     # keep pool topped up in the background (non-blocking)
     try:
         refill_tempmail_pool(5)
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-proxy.py:877] {_e}")
         pass
     return addr
 

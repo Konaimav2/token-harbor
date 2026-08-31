@@ -28,7 +28,8 @@ def term_size():
     try:
         sz = shutil.get_terminal_size((60, 20))
         return max(1, sz.columns), max(1, sz.lines)
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:31] {_e}")
         return 60, 20
 
 def term_width():
@@ -259,7 +260,8 @@ def log(msg, icon="info"):
         LOG_FILE = BASE / "farm.log"
         with open(LOG_FILE, "a") as f:
             f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:262] {_e}")
         pass
 
 
@@ -270,7 +272,8 @@ def dlog(msg):
         LOG_FILE = BASE / "farm.log"
         with open(LOG_FILE, "a") as f:
             f.write(f"[{time.strftime('%H:%M:%S')}]   > {msg}\n")
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:273] {_e}")
         pass
 
 
@@ -288,7 +291,8 @@ def enter_fullscreen():
         sys.stdout.write("\x1b[?25l")       # hide cursor
         sys.stdout.flush()
         _FULLSCREEN_ACTIVE = True
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:291] {_e}")
         pass
 
 
@@ -299,7 +303,8 @@ def exit_fullscreen():
         sys.stdout.write("\x1b[?25h")    # show cursor
         sys.stdout.flush()
         _FULLSCREEN_ACTIVE = False
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:302] {_e}")
         pass
 
 
@@ -328,7 +333,8 @@ def getch(timeout=None):
                 cur = _t.tcgetattr(fd)
                 cur[1] |= _t.OPOST | _t.ONLCR
                 _t.tcsetattr(fd, _t.TCSADRAIN, cur)
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-tui.py:331] {_e}")
             pass
 
     try:
@@ -368,7 +374,8 @@ def getch(timeout=None):
                 break
             data.extend(more)
         return bytes(data).decode('utf-8', 'replace')
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:376] {_e}")
         return ''
 
 
@@ -392,7 +399,8 @@ def raw_start():
         attrs[1] |= _t.OPOST | _t.ONLCR
         _t.tcsetattr(fd, _t.TCSADRAIN, attrs)
         _RAW_HELD = True
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:395] {_e}")
         pass
 
 
@@ -405,7 +413,8 @@ def raw_end():
     try:
         if _RAW_SAVED is not None:
             termios.tcsetattr(fd, termios.TCSADRAIN, _RAW_SAVED)
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:408] {_e}")
         pass
     _RAW_HELD = False
 
@@ -415,7 +424,8 @@ def _kdump(c, tag):
     try:
         with open(BASE / "_key_debug.log", "a") as _f:
             _f.write(f"{tag}: {c!r} hex={c.encode('utf-8','replace').hex() if c else 'empty'} at {time.time():.2f}\n")
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:418] {_e}")
         pass
 
 
@@ -608,7 +618,8 @@ def _flush_stdin():
         while select.select([fd], [], [], 0)[0]:
             if not os.read(fd, 4096):
                 break
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:611] {_e}")
         pass
 
 
@@ -901,7 +912,8 @@ def get_cloudmail_domains():
                 clean = [d.lstrip("@") for d in dl if d]
                 if clean:
                     return sorted(clean)
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-tui.py:904] {_e}")
             pass
     # 2. config file
     try:
@@ -914,7 +926,8 @@ def get_cloudmail_domains():
                 d = s.get("domain")
                 if d:
                     return [d]
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:917] {_e}")
         pass
     # 3. fallback
     return ["furries.my.id", "kona.my.id", "konaima.qzz.io", "konaima.tech", "nothingisfree.qzz.io", "onboarding.qzz.io"]
@@ -928,7 +941,8 @@ def get_server_emails(server):
             return get_mailg_accounts()
         elif t == "cloudmail":
             return get_cloudmail_addresses()
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:931] {_e}")
         pass
     return []
 
@@ -962,6 +976,7 @@ def create_cloudmail_inbox(email, password="test123"):
                     return True
                 return False
             except Exception as e:
+                print(f"[swallow th-tui.py:976] {_e}")
                 last_err = e
                 auth_err = "401" in str(e) or "token" in str(e).lower() or "login failed" in str(e)
                 if attempt == 0 and auth_err:
@@ -1107,7 +1122,8 @@ def pick_address(c):
                         rest = em[len(base):].split("@")[0]
                         if rest.isdigit():
                             max_n = max(max_n, int(rest))
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:1110] {_e}")
                 pass
             pfx = f"{pfx}{max_n + 1}"
         return pfx + "@" + dom
@@ -1225,7 +1241,8 @@ def resend_verification(email, password):
                 _hz.human_type(pg, pg.locator('input[name="password"]'), password)
                 _hz.rand_delay(0.4, 1.0)
                 _hz.human_click(pg, pg.locator('button[type="submit"]'))
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:1241] {_e}")
                 pg.fill('input[name="email"]', email)
                 pg.fill('input[name="password"]', password)
                 pg.click('button[type="submit"]', timeout=30000)
@@ -1505,7 +1522,8 @@ def _ensure_local_proxy():
                     log("Proxy-controller ready (" + r.stdout.strip() + ")", "ok")
                     _LOCAL_PROXY_READY = True
                     return True
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:1508] {_e}")
                 pass
             _t.sleep(2)
         log("Proxy-controller started but not ready yet", "warn")
@@ -1519,7 +1537,8 @@ def _proxy_id(p):
     """Stable identity for a proxy entry (used for rate-limit cooldown)."""
     try:
         return f"{p[0]}://{p[1]}:{p[2]}" + (f":{p[3]}" if len(p) > 3 and p[3] else "")
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:1536] {_e}")
         return str(p)
 
 
@@ -1531,14 +1550,16 @@ def _load_ratelimited():
     """Return {proxy_id: ts} for proxies on 1h cooldown (expired purged)."""
     try:
         d = json.loads(_rl_file().read_text())
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:1548] {_e}")
         d = {}
     now = time.time()
     keep = {k: v for k, v in d.items() if now - float(v) < 3600}
     if len(keep) != len(d):
         try:
             _rl_file().write_text(json.dumps(keep, indent=2))
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-tui.py:1541] {_e}")
             pass
     return keep
 
@@ -1583,7 +1604,8 @@ def _next_proxy(c, last=None):
                 capture_output=True, text=True, timeout=8)
             if r.returncode == 0 and r.stdout.strip() and r.stdout.strip().count('.') == 3:
                 return ("socks5", "127.0.0.1", 7920, "proxy", "wuzz@04Store")
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-tui.py:1586] {_e}")
             pass
         # fall through to list
     if mode == "vpngate":
@@ -1598,7 +1620,8 @@ def _next_proxy(c, last=None):
         if isinstance(manual, str):
             try:
                 p = pm.parse_proxy(manual) if hasattr(pm, "parse_proxy") else _parse_manual_proxy(manual)
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:1617] {_e}")
                 p = None
         if p:
             _host = p[1] if len(p) > 1 else "?"
@@ -1637,7 +1660,8 @@ def _next_proxy(c, last=None):
             # use cached check result (from proxy-menu C=Check) when fresh —
             # overrides the auto live-check on every use
             res = pm.cached_check_proxy(p, timeout=8) if hasattr(pm, "cached_check_proxy") else pm.check_proxy(p, timeout=8)
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-tui.py:1656] {_e}")
             res = None
         if not res:
             continue  # dead proxy, try next
@@ -1698,14 +1722,16 @@ def _solve_captcha(pg, c, timeout=180):
     try:
         if pg.frame_locator('iframe[src*="turnstile"]').first.is_visible(timeout=1500):
             has_ts = True
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:1701] {_e}")
         pass
     if not has_ts:
         # some builds embed it differently
         try:
             body = pg.inner_text("body", timeout=3000)
             has_ts = "verify" in body.lower() and "turnstile" in pg.content().lower()
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-tui.py:1708] {_e}")
             pass
     if not has_ts:
         return None
@@ -1718,7 +1744,8 @@ def _solve_captcha(pg, c, timeout=180):
                 if tok:
                     log("Turnstile solved (token captured)", "ok")
                     return tok
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:1721] {_e}")
                 pass
             time.sleep(2)
         log("Turnstile not solved manually in time", "warn")
@@ -1756,7 +1783,8 @@ def _shot_fail(pg, email):
         pg.screenshot(path=str(_shot), full_page=True)
         log(f"Screenshot saved: {_shot}", "info")
         return str(_shot)
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:1778] {_e}")
         return None
 
 
@@ -1812,7 +1840,8 @@ def _env_vnc_pw():
             line = line.strip()
             if line.startswith("VNC_PASSWORD=") and not line.startswith("#"):
                 return line.split("=", 1)[1].strip().strip("'\"")
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:1815] {_e}")
         pass
     return ""
 
@@ -1842,13 +1871,15 @@ def _start_vnc_stack():
             _sp.run('x11vnc -storepasswd "%s" /run/x11vnc-passwd' % auth_xs, shell=True)
             try:
                 os.chmod("/run/x11vnc-passwd", 0o600)
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:1845] {_e}")
                 pass
         elif os.environ.get("VNC_PASSWORD") or _env_vnc_pw():
             try:
                 _sp.run('x11vnc -storepasswd "%s" /run/x11vnc-passwd' % auth_xs, shell=True)
                 os.chmod("/run/x11vnc-passwd", 0o600)
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:1851] {_e}")
                 pass
         _sp.Popen(["x11vnc", "-display", ":99", "-forever", "-shared",
                    "-rfbauth", "/run/x11vnc-passwd", "-rfbport", "5900"],
@@ -1874,7 +1905,8 @@ def _start_vnc_stack():
     try:
         out = _sp.getoutput("ss -ltn 'sport = :6080' 2>/dev/null | head -1; echo MARKER; ss -ltn 'sport = :5900' 2>/dev/null | head -1")
         log(f"VNC ports: {out.replace(chr(10), ' | ')}", "info")
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:1877] {_e}")
         pass
 
 
@@ -1903,7 +1935,8 @@ def create_account(c, email=None, password=None, _retry=True):
     headless = not c.get("vnc_mode", False)
     try:
         pw_timeout_ms = max(5, int(c.get("pw_timeout", 120))) * 1000
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:1929] {_e}")
         pw_timeout_ms = 120000
     _ensure_deps("curl_cffi")
     # proxy handling
@@ -1955,18 +1988,21 @@ def create_account(c, email=None, password=None, _retry=True):
                                     msg = msg.get("message", "")
                                 text = f"{resp.status}:{str(msg)[:150]}" if msg else f"{resp.status}:{str(j)[:150]}"
                                 _api_errors.append(text)
-                except Exception:
+                except Exception as _e:
+                    print(f"[swallow th-tui.py:1958] {_e}")
                     pass
             pg.on("response", _on_api_resp)
             pg.goto("https://tokenharbor.ai/login?mode=signup", wait_until="domcontentloaded", timeout=pw_timeout_ms)
             try:
                 pg.wait_for_load_state("networkidle", timeout=min(15000, pw_timeout_ms))
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:1964] {_e}")
                 pass
             # wait for form to render (proxy may be slow)
             try:
                 pg.wait_for_selector('input[name="email"]', timeout=min(30000, pw_timeout_ms))
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:1969] {_e}")
                 pass
             time.sleep(2)  # extra settle time for proxy
             time.sleep(1)
@@ -1975,7 +2011,8 @@ def create_account(c, email=None, password=None, _retry=True):
                 import importlib.util as _ihu
                 _hz_spec = _ihu.spec_from_file_location("humanize", str(BASE / "humanize.py"))
                 _hz = _ihu.module_from_spec(_hz_spec); _hz_spec.loader.exec_module(_hz)
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:2004] {_e}")
                 _hz = None
             try:
                 if _hz:
@@ -2001,13 +2038,15 @@ def create_account(c, email=None, password=None, _retry=True):
             time.sleep(3)
             try:
                 pg.wait_for_load_state("networkidle", timeout=15000)
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:2004] {_e}")
                 pass
             url = pg.url.lower()
             body = ""
             try:
                 body = pg.inner_text("body", timeout=8000).lower()
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:2010] {_e}")
                 pass
             # detect dashboard vs landing page vs stall
             # SPA: URL may stay /login?mode=signup even after dashboard loads
@@ -2023,7 +2062,8 @@ def create_account(c, email=None, password=None, _retry=True):
             if on_dashboard and ("loading" in body or len(body) < 50):
                 try:
                     pg.wait_for_load_state("networkidle", timeout=15000)
-                except Exception:
+                except Exception as _e:
+                    print(f"[swallow th-tui.py:2026] {_e}")
                     pass
                 body = pg.inner_text("body", timeout=8000).lower()
                 # SPA: URL may stay /login?mode=signup even after dashboard loads
@@ -2114,7 +2154,8 @@ def create_account(c, email=None, password=None, _retry=True):
                         # wait for page to settle after submit
                         try:
                             pg.wait_for_load_state("networkidle", timeout=20000)
-                        except Exception:
+                        except Exception as _e:
+                            print(f"[swallow th-tui.py:2117] {_e}")
                             pass
                         time.sleep(3)
                         # re-read body + URL
@@ -2150,7 +2191,8 @@ def create_account(c, email=None, password=None, _retry=True):
         elog(f"create account {email}: {e}", traceback.format_exc()[:200])
         try:
             b.close()
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-tui.py:2153] {_e}")
             pass
         return None
 
@@ -2363,7 +2405,8 @@ def _test_key(key, model="deepseek-v4-flash:free"):
                 pp = _next_proxy(load_cfg())
                 if pp and pp[0] in ("http", "socks5"):
                     proxies = _build_requests_proxy(pp)
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:2366] {_e}")
                 pass
     def _req(method, path, body=None):
         # relay: call relay ROOT, x-relay-target = full upstream URL incl path
@@ -2382,7 +2425,8 @@ def _test_key(key, model="deepseek-v4-flash:free"):
                 if r.status_code >= 500 or "FUNCTION_INVOCATION_FAILED" in r.text[:100]:
                     raise RuntimeError("relay failed")
                 return r
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:2417] {_e}")
                 pass  # fall through to direct
         return requests.request(method, target + path, **kw)
 
@@ -2394,7 +2438,8 @@ def _test_key(key, model="deepseek-v4-flash:free"):
         try:
             j = r.json()
             return j.get("error", {}).get("message", r.text[:60]) if isinstance(j, dict) else r.text[:60]
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-tui.py:2430] {_e}")
             return r.text[:60]
     # 1. models list
     try:
@@ -2414,7 +2459,8 @@ def _test_key(key, model="deepseek-v4-flash:free"):
                 if choices:
                     return True, "ok"
                 return False, f"completions=no_choices:{r.text[:60]}"
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:2450] {_e}")
                 return False, f"completions=bad_json:{r.text[:60]}"
         return False, f"completions={r.status_code}:{_err_from(r)[:80]}"
     except Exception as e:
@@ -2431,7 +2477,8 @@ def _get_relay_proxy():
                   if p[0] == "relay" and len(p) > 1 and isinstance(p[1], str) and p[1].startswith("http")]
         if relays:
             return random.choice(relays)
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:2434] {_e}")
         pass
     return None
 
@@ -2533,11 +2580,13 @@ def open_verify_link(link):
             subprocess.Popen(["chromium-browser", "--no-sandbox", link],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:2536] {_e}")
         pass
     try:
         webbrowser.open(link)
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:2540] {_e}")
         pass
 
 
@@ -2697,7 +2746,8 @@ def reverify_flow(c, email, password):
                 if keys:
                     key = keys[0].get("key", "") or keys[0].get("accessToken", "")
                     log(f"API key fetched: {key[:40]}...", "ok")
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:2700] {_e}")
                 pass
         if key:
             works, why = _test_key(key)
@@ -2741,7 +2791,8 @@ def _efm_python():
     try:
         import camoufox  # noqa
         return sys.executable
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:2744] {_e}")
         pass
     for py in ["/usr/local/lib/hermes-agent/venv/bin/python3", "/usr/bin/python3", "python3"]:
         try:
@@ -2750,7 +2801,8 @@ def _efm_python():
             r = _sp.run([p, "-c", "import camoufox"], capture_output=True, text=True, timeout=15)
             if r.returncode == 0:
                 return p
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-tui.py:2753] {_e}")
             continue
     return sys.executable
 
@@ -2769,7 +2821,8 @@ def enable_free_models_for(email, password, api_key):
         ok, _det = efm.free_model_ok(api_key)
         if ok:
             return True
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:2772] {_e}")
         pass
     # 2. run the script for this one account (handles Camoufox login + consent)
     try:
@@ -2789,9 +2842,11 @@ def enable_free_models_for(email, password, api_key):
             import enable_free_models as efm
             ok2, _ = efm.free_model_ok(api_key)
             return ok2
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-tui.py:2832] {_e}")
             return "consent" in out or "enabled" in out.lower()
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:2834] {_e}")
         return False
 
 
@@ -3220,6 +3275,7 @@ def menu_tokens():
                     try:
                         works, why = fut.result()
                     except Exception as e:
+                        print(f"[swallow th-tui.py:3262] {_e}")
                         works, why = False, str(e)[:80]
                     results[rec["email"]] = (works, why)
                     checks[rec["email"]] = {
@@ -3485,7 +3541,8 @@ def menu_mail_servers(c):
             # Add new mail server — interactive
             try:
                 name = raw_input("  Server name: ").strip()
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:3528] {_e}")
                 name = ""
             if not name:
                 log("Server name required", "warn")
@@ -3506,7 +3563,8 @@ def menu_mail_servers(c):
             default_url = "http://127.0.0.1:8790" if srv_type == "mailg" else ("https://cmail.arraffi.my.id" if srv_type == "cloudmail" else "")
             try:
                 base_url = raw_input(f"  API endpoint [Enter={default_url}]: ").strip() or default_url
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:3549] {_e}")
                 base_url = default_url
             domain = ""
             domains = []
@@ -3526,7 +3584,8 @@ def menu_mail_servers(c):
                 if add_custom and add_custom[0] == "yes":
                     try:
                         cd = raw_input("  Domain (e.g. example.com): ").strip()
-                    except Exception:
+                    except Exception as _e:
+                        print(f"[swallow th-tui.py:3569] {_e}")
                         cd = ""
                     if cd:
                         if cd not in domains:
@@ -3605,7 +3664,8 @@ def menu_mail_servers(c):
                 if add_custom and add_custom[0] == "yes":
                     try:
                         cd = raw_input("  Domain: ").strip()
-                    except Exception:
+                    except Exception as _e:
+                        print(f"[swallow th-tui.py:3648] {_e}")
                         cd = ""
                     if cd and cd not in s.get("domains", []):
                         s.setdefault("domains", []).append(cd)
@@ -3780,7 +3840,8 @@ def _pipe_proxy_protect_key(p):
     """Protection key used by the merged-v11 build: proto|host|port|user|pass."""
     try:
         return "|".join(str(x) for x in p)
-    except Exception:
+    except Exception as _e:
+        print(f"[swallow th-tui.py:3823] {_e}")
         return ""
 
 
@@ -3945,7 +4006,8 @@ def menu_proxy(c):
         elif k == 'a' or k == 'A':
             try:
                 raw = raw_input("  Proxy (e.g. 1.2.3.4:8080, socks5://u:p@host:1080): ").strip()
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:3988] {_e}")
                 raw = ""
             if raw:
                 p, err = pm.add_proxy(raw)
@@ -3978,12 +4040,14 @@ def menu_proxy(c):
             # so use a higher but bounded pool. Can be overridden in config.json if needed.
             try:
                 first_workers = max(1, min(128, int(pcfg.get("check_workers", 96)), len(prox)))
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:4021] {_e}")
                 first_workers = min(96, len(prox))
             retry_cap = max(1, first_workers // 2)
             try:
                 retry_workers_cfg = int(pcfg.get("retry_workers", retry_cap))
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:4026] {_e}")
                 retry_workers_cfg = retry_cap
 
             log(f"Checking {len(prox)} proxies ({first_workers} workers, compact output)...", "arr")
@@ -4026,6 +4090,7 @@ def menu_proxy(c):
                     try:
                         r = _f.result()
                     except Exception as e:
+                        print(f"[swallow th-tui.py:4068] {_e}")
                         _p = _futs[_f]
                         _h = _p[1] if len(_p) > 1 else "?"
                         _pt = _p[2] if len(_p) > 2 else "?"
@@ -4056,6 +4121,7 @@ def menu_proxy(c):
                         try:
                             r = _f.result()
                         except Exception as e:
+                            print(f"[swallow th-tui.py:4098] {_e}")
                             _p = _futs[_f]
                             _h = _p[1] if len(_p) > 1 else "?"
                             _pt = _p[2] if len(_p) > 2 else "?"
@@ -4137,7 +4203,8 @@ def menu_proxy(c):
                 amt = raw_input("  How many proxies to scrape? [100]: ").strip()
                 amt = int(amt) if amt else 100
                 amt = max(1, min(amt, 2000))
-            except Exception:
+            except Exception as _e:
+                print(f"[swallow th-tui.py:4180] {_e}")
                 amt = 100
             log("Scraping " + str(amt) + " fresh proxies...", "arr")
             fresh = pm.scrape_proxies(amt)
@@ -4418,7 +4485,8 @@ def main():
     finally:
         try:
             signal.signal(signal.SIGINT, signal.SIG_DFL)
-        except Exception:
+        except Exception as _e:
+            print(f"[swallow th-tui.py:4421] {_e}")
             pass
         exit_fullscreen()  # restore terminal on exit (even Ctrl+C)
         raw_end()          # restore cooked mode
