@@ -37,6 +37,39 @@ if _venv_py.exists():
 AUTH_BASE = "https://auth.flamingoproxies.com"
 DASH_BASE = "https://dashboard.flamingoproxies.com"
 V3_SITEKEY = "6LeQUB8sAAAAAF1dsVInisFV-UO6hZQj6cowDm48"  # recaptcha v3 (invisible)
+
+STEALTH_JS = """() => {
+  try {
+    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+    Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+    Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+    window.chrome = window.chrome || {runtime: {}};
+  } catch (e) {}
+}"""
+
+
+def _launch_browser(p, exe, headless, proxy_host=""):
+    """Real Google Chrome first (better v3 score than Chromium-for-Testing),
+    bundled chromium fallback. Returns browser."""
+    base_args = ["--no-sandbox", "--disable-dev-shm-usage",
+                 "--disable-blink-features=AutomationControlled"]
+    if proxy_host:
+        base_args.append("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE " + proxy_host)
+    else:
+        base_args.append("--disable-ipv6")
+    try:
+        return p.chromium.launch(channel="chrome", headless=headless, args=base_args)
+    except Exception:
+        pass
+    try:
+        import shutil
+        real = shutil.which("google-chrome") or "/opt/google/chrome/google-chrome"
+        return p.chromium.launch(executable_path=real, headless=headless, args=base_args)
+    except Exception:
+        pass
+    return p.chromium.launch(
+        executable_path=exe, headless=headless,
+        args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
 DEFAULT_REF = "FLGCEJ36R52S"
 
 ACCOUNTS_FILE = BASE / "flamingo_accounts.txt"
@@ -290,24 +323,34 @@ def create_one(tui, email, name, password, proxy_parsed, ref, vnc_mode=False,
     b = None
     try:
         with sync_playwright() as p:
-            launch_args = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-                           "--disable-ipv6"]
-            if proxy_parsed and proxy_parsed[1]:
-                # Host-resolver rule must EXCLUDE the proxy host, else Chromium
-                # can't resolve the proxy itself (socks5 bridge on 127.0.0.1 is
-                # an IP literal — unaffected by DNS rules). Direct mode must
-                # NOT set MAP * ~NOTFOUND or all DNS fails.
-                launch_args.append("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE " + proxy_parsed[1])
-            b = p.chromium.launch(
-                executable_path=exe, headless=not vnc_mode, args=launch_args)
-            ctx_kwargs = {"viewport": {"width": 1280, "height": 800}}
+            b = _launch_browser(p, exe, headless=not vnc_mode,
+                                proxy_host=(proxy_parsed[1] if proxy_parsed and proxy_parsed[1] else ""))
+            ctx_kwargs = {"viewport": {"width": 1280, "height": 800},
+                          "locale": "en-US", "timezone_id": "Asia/Jakarta",
+                          "user_agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                         "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                         "Chrome/126.0.0.0 Safari/537.36")}
             if proxy_parsed:
                 ctx_kwargs["proxy"] = pm.proxy_to_playwright(proxy_parsed)
             ctx = b.new_context(**ctx_kwargs)
+            ctx.add_init_script(STEALTH_JS)
             if gmail_cookies:
                 try:
                     ctx.add_cookies(gmail_cookies)
                     log("injected google session cookies (v3 score boost)")
+                    # act like the session owner: a logged-in Google visit with
+                    # real dwell/read behavior before touching the target site.
+                    try:
+                        gpg = ctx.new_page()
+                        gpg.goto("https://www.google.com/", wait_until="domcontentloaded", timeout=30000)
+                        time.sleep(4)
+                        gpg.mouse.move(random.randint(200, 900), random.randint(200, 500))
+                        time.sleep(3)
+                        gpg.mouse.wheel(0, 300)
+                        time.sleep(4)
+                        gpg.close()
+                    except Exception:
+                        pass
                 except Exception as e:
                     log(f"cookie inject failed: {str(e)[:60]}", "warn")
             pg = ctx.new_page()
@@ -461,11 +504,27 @@ def create_one(tui, email, name, password, proxy_parsed, ref, vnc_mode=False,
             if outcome != "verify-tab":
                 log("no verify tab and no redirect after 60s", "warn")
                 return "failed"
-            # 2. verification code
+            # 2. verification code (with one in-session resend if mail is slow)
             log("verify tab shown — polling inbox for 6-digit code...")
             code = poll_verify_code(tui, email)
             if not code:
-                log("no verification code within 3min", "warn")
+                log("no code yet — resending once in-session...")
+                try:
+                    res = pg.evaluate("""async ([em]) => {
+                        const tok = await grecaptcha.execute(
+                            '6LeQUB8sAAAAAF1dsVInisFV-UO6hZQj6cowDm48', {action: 'submit'});
+                        const csrf = document.querySelector("input[name='csrf_token']").value;
+                        const r = await fetch('/action/resend-signup-code', {method: 'POST',
+                            headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrf},
+                            body: JSON.stringify({email: em, recaptcha_token: tok})});
+                        return await r.json();
+                    }""", [email])
+                    log(f"resend: {str(res)[:120]}")
+                    code = poll_verify_code(tui, email, timeout=180)
+                except Exception as e:
+                    log(f"resend err: {str(e)[:80]}", "warn")
+            if not code:
+                log("no verification code within 6min", "warn")
                 return "registered"
             pg.fill("#verify-signup-code", code)
             pg.locator("#verifySignupForm button[type='submit']").first.click(timeout=10000)
