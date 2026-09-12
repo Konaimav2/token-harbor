@@ -835,9 +835,13 @@ def load_cfg():
 
 
 def _atomic_write_text(path, text, mode=0o600):
-    """Atomic write: tmp + flush + fsync + os.replace. Never truncates in place."""
+    """Atomic write: tmp + flush + fsync + os.replace. Never truncates in place.
+
+    Resolves symlinks FIRST (keys.txt -> data/keys.txt): replacing the link
+    itself would silently split the store into two files.
+    """
     import tempfile
-    path = Path(path)
+    path = Path(os.path.realpath(path))
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix="." + path.name + ".tmp")
     try:
