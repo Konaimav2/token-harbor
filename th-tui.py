@@ -2460,7 +2460,7 @@ def create_account(c, email=None, password=None, _retry=True):
                 # (not a confirmed duplicate). Do NOT mark used/terminal —
                 # fall through to the stall/retry handling below.
                 log(f"{email}: registered-phrase but form still present + api=none — treating as stall, NOT terminal", "warn")
-            if any(p in body for p in [
+            _blocked_phrases = [
                 "couldn't create your account", "couldn't create your account right now",
                 "can't create your account", "try again in a minute",
                 "our team has been alerted", "support team has been informed",
@@ -2468,13 +2468,16 @@ def create_account(c, email=None, password=None, _retry=True):
                 "too many sign-ups", "sign-ups from this network", "in an hour",
                 "blacklist", "blocked", "suspicious", "invalid email",
                 "email domain not allowed", "temp email", "disposable",
-            ]):
+            ]
+            _blocked_hit = [p for p in _blocked_phrases if p in body]
+            if _blocked_hit:
                 _is_net_rl = any(s in body for s in ["too many sign-ups", "sign-ups from this network", "in an hour"])
                 if _is_net_rl and proxy_parsed:
                     _mark_proxy_ratelimited(_proxy_id(proxy_parsed), c.get("_last_proxy_ip", ""))
                     c["_last_fail_ratelimit"] = True
+                    log(f"Backend network rate-limit ({', '.join(_blocked_hit)}) — cooldown 1h + rotate", "warn")
                 else:
-                    log("Backend blocked signup — rotating proxy", "warn")
+                    log(f"Backend blocked signup ({', '.join(_blocked_hit)}) — rotating proxy | page={body[:300]}", "warn")
                 b.close()
                 return None  # let run_full_flow retry with different proxy
             # stall/retry path — also reached after the suspect-registered warn above
