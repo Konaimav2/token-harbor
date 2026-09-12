@@ -311,6 +311,306 @@ def _solve_v3(api_key, provider, page_url, min_score="0.3", timeout=300):
     return ""
 
 
+def _gmail_cookies_for(stem_or_email):
+    """Load google-session cookies for a gmail (stem or full address)."""
+    stem = stem_or_email.split("@")[0].replace(".", "_") + "_gmail_com.json"
+    raw = json.loads((Path("/root/projects/gmail-inbox/cookies") / stem).read_text())
+    return [{"name": c["name"], "value": c["value"], "domain": c["domain"],
+             "path": c.get("path", "/"), "secure": bool(c.get("secure", True)),
+             "httpOnly": bool(c.get("httpOnly", False)), "sameSite": c.get("sameSite", "Lax")}
+            for c in raw if "google.com" in c.get("domain", "") or "youtube.com" in c.get("domain", "")]
+
+
+def _oauth_click_text(pg, txt):
+    for sel in [f"button:has-text('{txt}')", f"a:has-text('{txt}')",
+                f"div[role='button']:has-text('{txt}')"]:
+        try:
+            loc = pg.locator(sel).first
+            if loc.count() and loc.is_visible(timeout=2000):
+                loc.click(timeout=8000)
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _oauth_click_text(pg, txt):
+    for sel in [f"button:has-text('{txt}')", f"a:has-text('{txt}')",
+                f"div[role='button']:has-text('{txt}')"]:
+        try:
+            loc = pg.locator(sel).first
+            if loc.count() and loc.is_visible(timeout=2000):
+                loc.click(timeout=8000)
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def oauth_login_session(tui, gmail, vnc_mode=False):
+    """OAuth login, return (stop_fn, pg, ctx) with an authed dashboard session.
+
+    Caller must call stop_fn() (closes browser). Returns (None,None,None) on failure.
+    """
+    from playwright.sync_api import sync_playwright
+    exe = tui.preflight_browser(log_it=False, headless=not vnc_mode)
+    if not exe:
+        return None, None, None
+    try:
+        gcookies = _gmail_cookies_for(gmail)
+    except Exception:
+        return None, None, None
+    pw = sync_playwright().start()
+    try:
+        try:
+            b = pw.chromium.launch(channel="chrome", headless=not vnc_mode,
+                                   args=["--no-sandbox", "--disable-dev-shm-usage",
+                                         "--disable-blink-features=AutomationControlled"])
+        except Exception:
+            b = pw.chromium.launch(executable_path=exe, headless=not vnc_mode,
+                                   args=["--no-sandbox", "--disable-dev-shm-usage"])
+    except Exception:
+        pw.stop()
+        return None, None, None
+    import functools
+    def stop():
+        try: b.close()
+        except Exception: pass
+        try: pw.stop()
+        except Exception: pass
+    try:
+        ctx = b.new_context(viewport={"width": 1280, "height": 900}, locale="en-US")
+        ctx.add_init_script(STEALTH_JS)
+        ctx.add_cookies(gcookies)
+        pg = ctx.new_page()
+        for i in range(3):
+            try:
+                pg.goto(f"{AUTH_BASE}/action/auth/google?remember=1",
+                        wait_until="commit", timeout=90000)
+                break
+            except Exception:
+                pg.wait_for_timeout(5000)
+        for _ in range(30):
+            pg.wait_for_timeout(5000)
+            url = pg.url or ""
+            if "flamingoproxies.com" in url and "accounts.google" not in url \
+                    and "auth.flamingoproxies" not in url:
+                break
+            if "accountchooser" in url:
+                try:
+                    tile = pg.locator(f'div[data-email="{gmail}"]').first
+                    if tile.count():
+                        tile.click(timeout=6000)
+                        pg.wait_for_timeout(4000)
+                        continue
+                except Exception:
+                    pass
+            if "consent" in url or "oauth" in url:
+                if _oauth_click_text(pg, "Izinkan") or _oauth_click_text(pg, "Allow") \
+                        or _oauth_click_text(pg, "Continue") or _oauth_click_text(pg, "Lanjutkan"):
+                    pg.wait_for_timeout(5000)
+                    continue
+        else:
+            stop()
+            return None, None, None
+        return stop, pg, ctx
+    except Exception:
+        stop()
+        return None, None, None
+
+
+def verify_flamingo_email(pg, tui, gmail, timeout=240):
+    """Verify + earn the newsletter point. Two mail shapes:
+    - email/password accounts: 6-digit code -> submit in the verify tab.
+    - any account: newsletter 'Confirm Subscription' link with a token ->
+      open it in-session (also flips Verified + grants +1pt).
+    Returns True when verified."""
+    pg.goto(f"{DASH_BASE}/settings", wait_until="domcontentloaded", timeout=60000)
+    pg.wait_for_timeout(5000)
+    clicked = False
+    # the pink Verify Email button inside the Email Verification card
+    try:
+        card = pg.locator("div:has-text('Once verified, you will receive 50 MB')").first
+        if card.count():
+            btn = card.locator("button:has-text('Verify Email')").first
+            if not btn.count():
+                btn = pg.locator("button:has-text('Verify Email')").first
+        else:
+            btn = pg.locator("button:has-text('Verify Email')").first
+        if btn.count():
+            btn.click(timeout=10000)
+            clicked = True
+    except Exception:
+        pass
+    if not clicked:
+        import sys as _sys
+        _sys.path.insert(0, str(BASE / "tools"))
+        import vision_solve as _vs
+        try:
+            x, y = _vs.locate_on_page(pg, "the pink Verify Email button in the Email Verification card")
+            pg.mouse.click(x, y)
+            clicked = True
+        except Exception as e:
+            log(f"verify button not found: {str(e)[:80]}", "warn")
+            return False
+    log("verify mail requested — polling inbox (code or newsletter link)...")
+    import re as _re
+    deadline = time.time() + timeout
+    code, nlink = "", ""
+    while time.time() < deadline:
+        try:
+            msgs = tui.read_mailg_inbox(gmail) or []
+        except Exception:
+            try:
+                msgs = tui.read_cloudmail_inbox(gmail) or []
+            except Exception:
+                msgs = []
+        for msg in msgs:
+            subj = str(msg.get("subject", "") or "")
+            body = str(msg.get("content", "") or msg.get("text", ""))
+            if "flamingo" not in (subj + body).lower():
+                continue
+            if not code:
+                m = _re.search(r"(?<!\d)(\d{6})(?!\d)", subj + "\n" + body)
+                if m and "newsletter" not in (subj + body).lower():
+                    code = m.group(1)
+            if not nlink:
+                for u in set(_re.findall(r"https?://[^\s\"'<>]+", body)):
+                    if "flamingoproxies.com/verify-email?token=" in u:
+                        nlink = u.replace("&amp;", "&").split("&")[0]
+                        break
+            if code or nlink:
+                break
+        if code or nlink:
+            break
+        time.sleep(8)
+    if nlink:
+        # newsletter confirm: verifies email AND grants +1pt
+        try:
+            pg.goto(nlink, wait_until="domcontentloaded", timeout=60000)
+            pg.wait_for_timeout(6000)
+        except Exception as e:
+            log(f"confirm link open: {str(e)[:60]}", "warn")
+    elif code:
+        # 6-digit code submit in the verify tab
+        try:
+            inp = pg.locator("input[inputmode='numeric'], input[name='code'], input[placeholder*='123456']").first
+            if inp.count():
+                inp.fill(code, timeout=10000)
+                try:
+                    pg.locator("button:has-text('Verify')").first.click(timeout=8000)
+                except Exception:
+                    pass
+                pg.wait_for_timeout(6000)
+        except Exception as e:
+            log(f"code submit: {str(e)[:80]}", "warn")
+    else:
+        log("no verify mail arrived", "warn")
+        return False
+    ok = _vconfirm(pg, f"settings showing {gmail} as Verified (no Not Verified badge)")
+    return ok
+
+
+def create_oauth(tui, gmail, ref, vnc_mode=False):
+    """Register via Google OAuth using a gmail session. Returns (flamingo_email, status).
+
+    DIRECT connection only (proxies can't reach accounts.google.com).
+    Attribution via affiliate_ref cookie, asserted before starting.
+    """
+    from playwright.sync_api import sync_playwright
+    exe = tui.preflight_browser(log_it=False, headless=not vnc_mode)
+    if not exe:
+        return gmail, "failed"
+    try:
+        gcookies = _gmail_cookies_for(gmail)
+    except Exception as e:
+        log(f"oauth cookies for {gmail} unavailable: {str(e)[:60]}", "warn")
+        return gmail, "failed"
+    b = None
+    try:
+        with sync_playwright() as p:
+            try:
+                b = p.chromium.launch(channel="chrome", headless=not vnc_mode,
+                                      args=["--no-sandbox", "--disable-dev-shm-usage",
+                                            "--disable-blink-features=AutomationControlled"])
+            except Exception:
+                b = p.chromium.launch(executable_path=exe, headless=not vnc_mode,
+                                      args=["--no-sandbox", "--disable-dev-shm-usage"])
+            ctx = b.new_context(viewport={"width": 1280, "height": 900}, locale="en-US")
+            ctx.add_init_script(STEALTH_JS)
+            ctx.add_cookies(gcookies)
+            pg = ctx.new_page()
+            code = ref_code(ref)
+            if code:
+                for i in range(3):
+                    try:
+                        pg.goto(f"{DASH_BASE}/affiliate-link?ref={code}",
+                                wait_until="domcontentloaded", timeout=60000)
+                        break
+                    except Exception:
+                        pg.wait_for_timeout(5000)
+                pg.wait_for_timeout(3000)
+                if not any(c["name"] == "affiliate_ref" for c in ctx.cookies()):
+                    log("NO affiliate_ref cookie — refusing unattributed oauth", "warn")
+                    return gmail, "noattr"
+                log(f"referral attached: {code}", "ok")
+            for i in range(3):
+                try:
+                    pg.goto(f"{AUTH_BASE}/action/auth/google?remember=1",
+                            wait_until="commit", timeout=90000)
+                    break
+                except Exception as e:
+                    log(f"oauth nav {i+1}/3: {str(e)[:50]}", "warn")
+                    pg.wait_for_timeout(5000)
+            # chooser + consent loop (same pattern as TokenHarbor oauth farm)
+            for _ in range(36):
+                pg.wait_for_timeout(5000)
+                url = pg.url or ""
+                if "flamingoproxies.com" in url and "accounts.google" not in url \
+                        and "auth.flamingoproxies" not in url:
+                    break
+                if "accountchooser" in url:
+                    try:
+                        tile = pg.locator(f'div[data-email="{gmail}"]').first
+                        if tile.count():
+                            tile.click(timeout=6000)
+                            log("chooser clicked")
+                            pg.wait_for_timeout(4000)
+                            continue
+                    except Exception:
+                        pass
+                    try:
+                        t2 = pg.get_by_text(gmail, exact=False).first
+                        if t2.count():
+                            t2.click(timeout=6000)
+                            log("chooser clicked (text)")
+                            pg.wait_for_timeout(4000)
+                            continue
+                    except Exception:
+                        pass
+                if "consent" in url or "oauth" in url:
+                    if _oauth_click_text(pg, "Izinkan") or _oauth_click_text(pg, "Allow") \
+                            or _oauth_click_text(pg, "Continue") or _oauth_click_text(pg, "Lanjutkan"):
+                        log("consent allowed")
+                        pg.wait_for_timeout(5000)
+                        continue
+            else:
+                log("oauth flow timed out", "warn")
+                return gmail, "failed"
+            pg.wait_for_timeout(5000)
+            ok = _vconfirm(pg, f"Flamingo dashboard logged in via Google as {gmail}")
+            return gmail, ("verified" if ok else "failed")
+    except Exception as e:
+        log(f"oauth {gmail}: {str(e)[:100]}", "warn")
+        return gmail, "failed"
+    finally:
+        try:
+            if b is not None:
+                b.close()
+        except Exception:
+            pass
+
+
 def create_one(tui, email, name, password, proxy_parsed, ref, vnc_mode=False,
                captcha_key="", captcha_provider="2captcha", gmail_cookies=None):  # noqa: C901
     """Register one Flamingo account. Returns status string."""
@@ -607,16 +907,56 @@ def flamingo_login(pg, email, password):
     return _vconfirm(pg, f"Flamingo dashboard logged in as {email}, sidebar and account area visible")
 
 
+def plan_active(pg, plan_name="Standard"):
+    """True if the named plan has data balance (e.g. '0.00 GB / 0.05 GB').
+
+    NOTE: the card can still say 'Not active — click to buy' while holding
+    redeemed data — that label tracks subscription state, not balance.
+    What matters for the generator is the data allotment."""
+    try:
+        pg.goto(f"{DASH_BASE}/?tab=residential", wait_until="domcontentloaded", timeout=60000)
+        pg.wait_for_timeout(5000)
+        body = pg.inner_text("body", timeout=8000)
+        idx = body.find(plan_name)
+        if idx < 0:
+            return False
+        region = body[idx:idx + 600]
+        m = re.search(r"(\d+\.\d+)\s*GB\s*/\s*(\d+\.\d+)\s*GB", region)
+        if m and float(m.group(2)) > 0:
+            log(f"plan {plan_name}: {m.group(1)}/{m.group(2)} GB available")
+            return True
+        return False
+    except Exception:
+        return False
+        region = body[idx:idx + 600]
+        return "not active" not in region.lower()
+    except Exception:
+        return False
+
+
 def affiliate_points(pg):
     """Return (available_points:int, has_active_plan:bool) from affiliate page."""
     pg.goto(f"{DASH_BASE}/affiliate", wait_until="domcontentloaded", timeout=60000)
     pg.wait_for_timeout(5000)
-    body = pg.inner_text("body", timeout=8000)
     pts, active = 0, False
-    m = re.search(r"Points to spend\s*(\d+)", body)
-    if m:
-        pts = int(m.group(1))
-    active = bool(re.search(r"GB left|active plan|Active Residential Plans\s*[1-9]", body, re.I))
+    try:
+        html = pg.content()
+        m = (re.search(r'points-available[^>]*>\s*(\d+)', html)
+             or re.search(r'legend-available[^>]*>\s*(\d+)', html))
+        if m:
+            pts = int(m.group(1))
+        else:
+            body = pg.inner_text("body", timeout=8000)
+            m2 = re.search(r"Points to spend\s*(\d+)", body)
+            if m2:
+                pts = int(m2.group(1))
+    except Exception:
+        pass
+    try:
+        body = pg.inner_text("body", timeout=8000)
+        active = bool(re.search(r"GB left|active plan|Active Residential Plans\s*[1-9]", body, re.I))
+    except Exception:
+        pass
     return pts, active
 
 
@@ -674,19 +1014,32 @@ def _vision_locate_click(pg, target, timeout=120):
 
 
 def claim_50mb(pg):
-    """Affiliate page: Claim/Redeem the free 50MB (button text varies). Vision-gated."""
+    """Click Redeem on the 50MB Standard Points-Shop card (+ confirm modal).
+
+    NOTE: #redeem-key-btn is the *gift code* redeem — never click that.
+    Vision-gated on success."""
     pg.goto(f"{DASH_BASE}/affiliate", wait_until="domcontentloaded", timeout=60000)
     pg.wait_for_timeout(5000)
-    for txt in ("Claim", "Redeem"):
-        try:
-            btns = pg.locator(f"button:has-text('{txt}')")
-            if btns.count():
-                btns.first.click(timeout=10000)
-                pg.wait_for_timeout(4000)
-                break
-        except Exception:
-            pass
-    # confirm modal (Confirm/Yes/Claim now) if one appeared
+    try:
+        target = None
+        for b in pg.locator("button.redeem-btn").all():
+            try:
+                card = b.evaluate("""(el) => {
+                    let n = el, depth = 0, txt = '';
+                    while (n && depth < 6) { n = n.parentElement; depth++;
+                        if (n && /50MB|1GB/i.test(n.innerText || '')) { txt = n.innerText; break; } }
+                    return txt.slice(0, 200);
+                }""")
+                if "50MB" in card:
+                    target = b
+                    break
+            except Exception:
+                pass
+        (target or pg.locator("button.redeem-btn").nth(1)).click(timeout=10000)
+        pg.wait_for_timeout(4000)
+    except Exception as e:
+        log(f"50MB redeem click: {str(e)[:80]}", "warn")
+    # confirm modal (Confirm/Yes) if one appeared
     for txt in ("Confirm", "Yes", "Claim now", "Redeem now", "Confirm redeem"):
         try:
             loc = pg.locator(f"button:has-text('{txt}')").first
@@ -696,7 +1049,7 @@ def claim_50mb(pg):
                 break
         except Exception:
             pass
-    return _vconfirm(pg, "affiliate page showing the free 50MB claimed/redeemed or a success confirmation")
+    return _vconfirm(pg, "points shop showing the 50MB plan redeemed or a success confirmation")
 
 
 def _select_option_by_names(pg, scope, names):
@@ -920,9 +1273,59 @@ def save_generated(proxies, path=None):
     return added
 
 
+def _gen_logged_in(pg, pm, email, qty, sticky, country, plan):
+    """Affiliate claim -> configure generator -> generate -> save. pg is authed."""
+    pts, _ = affiliate_points(pg)
+    log(f"{email}: points={pts}")
+    if pts >= 1:
+        log(f"{email}: claiming free 50MB...")
+        claim_50mb(pg)
+    active = plan_active(pg)
+    log(f"{email}: active_plan={active}")
+    if not active:
+        log(f"{email}: no active plan — cannot generate yet", "warn")
+        return 0
+    # configure the visible generator form (discovers country/state/city ids)
+    cfg = configure_generator(pg, qty=qty, sticky_min=2,
+                              sticky_max=max(2, min(5, sticky)), countries=GEN_COUNTRIES)
+    got = generate_proxies_api(pg, plan=plan, qty=qty, sticky=cfg.get("sticky", sticky),
+                               country=cfg.get("country", country))
+    log(f"{email}: generated {len(got)} proxies")
+    if not got:
+        return 0
+    added = save_generated(got)
+    # functional proof: live-check a sample (stronger than any screenshot)
+    try:
+        checked = 0
+        for g in got[:2]:
+            r = pm.check_proxy(("http", g["host"], int(g["port"]), g["user"], g["pw"]), timeout=10)
+            if r:
+                checked += 1
+        log(f"{email}: live-checked {checked}/{min(2, len(got))} sample OK")
+    except Exception as e:
+        log(f"live-check err: {str(e)[:60]}", "warn")
+    _vconfirm(pg, f"dashboard for {email}, proxies generated and saved")
+    return added
+
+
 def gen_account(tui, email, password, proxy_parsed, qty, sticky, country, plan, vnc_mode):
     """Login -> redeem if needed -> generate qty proxies -> save. Returns count saved."""
     from playwright.sync_api import sync_playwright
+    # OAuth-created accounts have no password: login via stored gmail session
+    if password.startswith("oauth:"):
+        gmail = email if "@" in email else password.split("oauth:", 1)[1]
+        stop, pg, ctx = oauth_login_session(tui, gmail, vnc_mode)
+        if not pg:
+            log(f"{email}: oauth login failed", "warn")
+            return 0
+        try:
+            pm = _proxy_mod()
+            return _gen_logged_in(pg, pm, email, qty, sticky, country, plan)
+        except Exception as e:
+            log(f"gen {email}: {str(e)[:100]}", "warn")
+            return 0
+        finally:
+            stop()
     exe = tui.preflight_browser(log_it=False, headless=not vnc_mode)
     if not exe:
         return 0
@@ -947,40 +1350,7 @@ def gen_account(tui, email, password, proxy_parsed, qty, sticky, country, plan, 
             if not flamingo_login(pg, email, password):
                 log(f"{email}: login failed", "warn")
                 return 0
-            pts, active = affiliate_points(pg)
-            log(f"{email}: points={pts} active_plan={active}")
-            if not active:
-                log(f"{email}: claiming free 50MB...")
-                claim_50mb(pg)
-                if pts < 1:
-                    # legacy redeem path as fallback
-                    redeem_50mb(pg)
-                pts, active = affiliate_points(pg)
-                log(f"{email}: after claim points={pts} active_plan={active}")
-            if not active:
-                log(f"{email}: no active plan (points={pts}) — cannot generate yet", "warn")
-                return 0
-            # configure the visible generator form (discovers country/state/city ids)
-            cfg = configure_generator(pg, qty=qty, sticky_min=2,
-                                      sticky_max=max(2, min(5, sticky)), countries=GEN_COUNTRIES)
-            got = generate_proxies_api(pg, plan=plan, qty=qty, sticky=cfg.get("sticky", sticky),
-                                       country=cfg.get("country", country))
-            log(f"{email}: generated {len(got)} proxies")
-            if not got:
-                return 0
-            added = save_generated(got)
-            # functional proof: live-check a sample (stronger than any screenshot)
-            try:
-                checked = 0
-                for g in got[:2]:
-                    r = pm.check_proxy(("http", g["host"], int(g["port"]), g["user"], g["pw"]), timeout=10)
-                    if r:
-                        checked += 1
-                log(f"{email}: live-checked {checked}/{min(2, len(got))} sample OK")
-            except Exception as e:
-                log(f"live-check err: {str(e)[:60]}", "warn")
-            _vconfirm(pg, f"dashboard for {email} with an active residential plan")
-            return added
+            return _gen_logged_in(pg, pm, email, qty, sticky, country, plan)
     except Exception as e:
         log(f"gen {email}: {str(e)[:100]}", "warn")
         return 0
@@ -1062,6 +1432,87 @@ def gen_main(args, tui):
     return 0
 
 
+def oauth_main(args, tui):
+    """OAuth farm: one Flamingo account per gmail session (DIRECT only)."""
+    flag = args.oauth_gmail.strip().lower()
+    if flag == "auto":
+        cdir = Path("/root/projects/gmail-inbox/cookies")
+        gmails = sorted(p.stem[:-len("_gmail_com")] for p in cdir.glob("*_gmail_com.json")) if cdir.exists() else []
+        # stem mangling is lossy (dots->underscores); resolve via DB below
+        gmails = _resolve_gmails(gmails)
+    else:
+        gmails = [e.strip() for e in args.oauth_gmail.split(",") if "@" in e]
+    gmails = gmails[:max(1, args.count)]
+    print(f"  TH-FLAMINGO-OAUTH: {len(gmails)} gmails (direct, ref={args.ref})")
+    used = load_used()
+    ok = fail = 0
+    for i, gmail in enumerate(gmails, 1):
+        if gmail.lower() in used:
+            log(f"[{i}/{len(gmails)}] {gmail} already attempted — skip")
+            continue
+        log(f"[{i}/{len(gmails)}] OAuth {gmail} ...")
+        try:
+            _, st = create_oauth(tui, gmail, args.ref, vnc_mode=args.vnc)
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            log(f"{gmail} oauth err: {str(e)[:80]}", "warn")
+            st = "failed"
+        mark_used(gmail)
+        save_account(gmail, "oauth:" + gmail.split("@")[0], gmail.split("@")[0], st)
+        if st == "verified":
+            ok += 1
+        else:
+            fail += 1
+        if i < len(gmails) and args.delay > 0:
+            time.sleep(args.delay)
+    print(f"\n  OAUTH DONE: {ok} ok / {fail} fail — accounts in {ACCOUNTS_FILE}")
+    return 0 if fail == 0 else 1
+
+
+def verify_main(args, tui):
+    """Verify email on existing OAuth farm accounts (→ +50MB bonus)."""
+    gmails = [e.strip() for e in args.verify_email.split(",") if "@" in e]
+    ok = fail = 0
+    for i, gmail in enumerate(gmails, 1):
+        log(f"[{i}/{len(gmails)}] verify {gmail} ...")
+        try:
+            stop, pg, ctx = oauth_login_session(tui, gmail, vnc_mode=args.vnc)
+            if not pg:
+                log(f"{gmail}: oauth login failed", "warn")
+                fail += 1
+                continue
+            try:
+                if verify_flamingo_email(pg, tui, gmail):
+                    ok += 1
+                    log(f"{gmail}: VERIFIED", "ok")
+                else:
+                    fail += 1
+            finally:
+                stop()
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            log(f"{gmail} verify err: {str(e)[:80]}", "warn")
+            fail += 1
+        if i < len(gmails) and args.delay > 0:
+            time.sleep(args.delay)
+    print(f"\n  VERIFY DONE: {ok} ok / {fail} fail")
+    return 0 if fail == 0 else 1
+
+
+def _resolve_gmails(stems):
+    """Map cookie-file stems back to real gmail addresses via inbox DB."""
+    try:
+        import sqlite3
+        db = sqlite3.connect("/root/projects/gmail-inbox/inbox.db")
+        rows = db.execute("SELECT email FROM accounts ORDER BY email").fetchall()
+        db.close()
+        return [r[0] for r in rows]
+    except Exception:
+        return []
+
+
 def main():
     ap = argparse.ArgumentParser(description="Farm FlamingoProxies referral accounts via webshare proxies")
     ap.add_argument("--count", type=int, default=1)
@@ -1075,6 +1526,10 @@ def main():
     ap.add_argument("--captcha-provider", default="2captcha")
     ap.add_argument("--gmail-cookie", default="",
                     help="gmail address for google session cookies (v3 boost), or 'auto' to rotate")
+    ap.add_argument("--oauth-gmail", default="",
+                    help="register via Google OAuth with gmail session(s): one address, 'auto', or comma list (DIRECT, skips email/password+v3)")
+    ap.add_argument("--verify-email", default="",
+                    help="verify email on existing OAuth farm account(s): gmail address or comma list")
     ap.add_argument("--no-proxy", action="store_true",
                     help="direct connection (exposes host IP — use for score tests)")
     ap.add_argument("--gen-only", action="store_true",
@@ -1101,6 +1556,12 @@ def main():
 
     if args.gen_only:
         return gen_main(args, tui)
+
+    if args.oauth_gmail.strip():
+        return oauth_main(args, tui)
+
+    if args.verify_email.strip():
+        return verify_main(args, tui)
 
     pool = ProxyPool(args.proxy, order=args.proxy_order, max_per_proxy=args.max_per_proxy)
     if not args.no_proxy and not pool.proxies:
