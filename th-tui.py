@@ -287,7 +287,7 @@ def enter_fullscreen():
     like a normal app, not a fullscreen takeover."""
     global _FULLSCREEN_ACTIVE
     try:
-        sys.stdout.write("\x1b[H\x1b[2J")   # home + clear (NOT alternate screen)
+        sys.stdout.write("\x1b[H\x1b[2J\x1b[3J")   # home + clear + scrollback (NOT alternate screen)
         sys.stdout.write("\x1b[?25l")       # hide cursor
         sys.stdout.flush()
         _FULLSCREEN_ACTIVE = True
@@ -309,9 +309,23 @@ def exit_fullscreen():
 
 
 def cls():
-    """Clear screen without flicker (clear THEN home, avoids diagonal stagger)."""
-    sys.stdout.write("\x1b[2J\x1b[H")
-    sys.stdout.flush()
+    """Clear screen without flicker (home + erase display + erase scrollback).
+
+    The 3J (erase scrollback) matters: without it every picker redraw stays in
+    scrollback and the UI looks like it never clears. On TERM=dumb/unknown
+    (no ANSI support) fall back to pushing old content off with newlines.
+    """
+    try:
+        if os.environ.get("TERM") in (None, "", "dumb", "unknown"):
+            sys.stdout.write("\n" * max(1, term_height()))
+        else:
+            sys.stdout.write("\x1b[H\x1b[2J\x1b[3J")
+        sys.stdout.flush()
+    except Exception:
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
 
 
 def getch(timeout=None):
@@ -323,16 +337,13 @@ def getch(timeout=None):
     """
     fd = sys.stdin.fileno()
 
-    # re-assert raw mode if a subprocess/submenu restored cooked mode
+    # re-assert cbreak mode if a subprocess/submenu restored cooked mode
+    # (must keep ISIG — never fall back to full setraw here)
     if _RAW_HELD:
         try:
-            import termios as _t
-            cur = _t.tcgetattr(fd)
-            if (cur[3] & (_t.ICANON | _t.ECHO)) and _RAW_SAVED is not None:
-                tty.setraw(fd)
-                cur = _t.tcgetattr(fd)
-                cur[1] |= _t.OPOST | _t.ONLCR
-                _t.tcsetattr(fd, _t.TCSADRAIN, cur)
+            cur = termios.tcgetattr(fd)
+            if (cur[3] & (termios.ICANON | termios.ECHO)) and _RAW_SAVED is not None:
+                _apply_cbreak(fd)
         except Exception as _e:
             print(f"[swallow th-tui.py:331] {_e}")
             pass
@@ -383,6 +394,21 @@ _RAW_HELD = False
 _RAW_SAVED = None
 
 
+def _apply_cbreak(fd):
+    """Put fd in cbreak mode but KEEP ISIG (Ctrl+C -> SIGINT) and OPOST|ONLCR
+    (no diagonal stagger). Shared by raw_start() and getch() re-assert so the
+    terminal never silently reverts to full setraw (which kills ISIG)."""
+    import termios as _t
+    tty.setcbreak(fd)
+    attrs = _t.tcgetattr(fd)
+    try:
+        attrs[3] |= _t.ISIG
+    except Exception:
+        pass
+    attrs[1] |= _t.OPOST | _t.ONLCR
+    _t.tcsetattr(fd, _t.TCSADRAIN, attrs)
+
+
 def raw_start():
     """Enter cbreak-ish mode (no echo, no canonical) but KEEP ISIG so Ctrl+C
     still generates SIGINT while blocked in Playwright/sleep/join."""
@@ -397,18 +423,7 @@ def raw_start():
     try:
         _RAW_SAVED = termios.tcgetattr(fd)
         _RAW_HELD = True  # mark BEFORE mutating so failures still restore
-        tty.setcbreak(fd)
-        # ensure ISIG stays on (setcbreak keeps it, setraw would clear it)
-        import termios as _t
-        attrs = _t.tcgetattr(fd)
-        # lflag is index 3: re-enable ISIG explicitly
-        try:
-            attrs[3] |= _t.ISIG
-        except Exception:
-            pass
-        # re-enable output post-processing: \n must also \r (else lines stagger diagonally)
-        attrs[1] |= _t.OPOST | _t.ONLCR
-        _t.tcsetattr(fd, _t.TCSADRAIN, attrs)
+        _apply_cbreak(fd)
     except Exception as _e:
         print(f"[swallow th-tui.py:395] {_e}")
         pass
@@ -1984,10 +1999,11 @@ def _solve_captcha(pg, c, timeout=180):
     Returns the token string or None.
     """
     import urllib.parse as _up
-    # detect turnstile iframe presence
+    # detect turnstile iframe presence (FrameLocator has no is_visible/count
+    # on all versions — use a plain Locator for detection)
     has_ts = False
     try:
-        if pg.frame_locator('iframe[src*="turnstile"]').first.is_visible(timeout=1500):
+        if pg.locator('iframe[src*="turnstile"]').count() > 0:
             has_ts = True
     except Exception as _e:
         print(f"[swallow th-tui.py:1701] {_e}")

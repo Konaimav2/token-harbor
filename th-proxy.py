@@ -284,10 +284,15 @@ def _ensure_requests_socks():
     try:
         import importlib.util, sys as _sys
         _sys.path.insert(0, str(Path(__file__).resolve().parent))
-        spec = importlib.util.spec_from_file_location("thdeps", str(Path(__file__).resolve().parent / "th-deps.py"))
-        if spec and spec.loader:
-            m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-            m.ensure("proxy_check", auto=True)
+        for _rel in ("config/th-deps.py", "scripts/th-deps.py", "th-deps.py"):
+            _p = Path(__file__).resolve().parent / _rel
+            if not _p.exists():
+                continue
+            spec = importlib.util.spec_from_file_location("thdeps", str(_p))
+            if spec and spec.loader:
+                m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+                m.ensure("proxy_check", auto=True)
+                return
     except Exception as _e:
         print(f"[swallow th-proxy.py:284] {_e}")
         pass
