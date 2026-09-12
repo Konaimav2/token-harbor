@@ -2439,18 +2439,28 @@ def create_account(c, email=None, password=None, _retry=True):
                         time.sleep(2)
                 b.close()
                 return {"email": email, "password": password, "api_key": api_key, "verified": False}
-            elif any(p in body for p in [
+            # NOTE: "already on board" deliberately NOT in this list — it matches
+            # landing-page boilerplate ("Already on board? Sign in") and caused
+            # false terminal + false USED marking on stalled signups.
+            _reg_phrases = [
                 "has already been registered", "email already exists",
                 "this email is already", "already registered with", "email is already on",
-                "already on board",
-            ]):
-                _api = _api_errors[-1] if _api_errors else 'none'
-                log(f"Email already registered: {email} | api={_api} | page={body[:120]}", "warn")
+            ]
+            _reg_hit = any(p in body for p in _reg_phrases)
+            _api = _api_errors[-1] if _api_errors else 'none'
+            if _reg_hit and (not has_form or _api != 'none'):
+                log(f"Email already registered: {email} | api={_api} | page={body[:500]}", "warn")
                 b.close()
                 mark_used(email)  # never pick this address again
                 c["_email_terminal"] = True  # stop retrying this email
                 return None
-            elif any(p in body for p in [
+            if _reg_hit:
+                # registered-phrase seen BUT the signup form is still present and
+                # the backend reported nothing: the submit most likely stalled
+                # (not a confirmed duplicate). Do NOT mark used/terminal —
+                # fall through to the stall/retry handling below.
+                log(f"{email}: registered-phrase but form still present + api=none — treating as stall, NOT terminal", "warn")
+            if any(p in body for p in [
                 "couldn't create your account", "couldn't create your account right now",
                 "can't create your account", "try again in a minute",
                 "our team has been alerted", "support team has been informed",
@@ -2467,7 +2477,8 @@ def create_account(c, email=None, password=None, _retry=True):
                     log("Backend blocked signup — rotating proxy", "warn")
                 b.close()
                 return None  # let run_full_flow retry with different proxy
-            else:
+            # stall/retry path — also reached after the suspect-registered warn above
+            if True:
                 url_now = pg.url
                 _hf = pg.locator('input[name="email"]').count()
                 dlog(f"DETECT: url={url_now} on_dashboard={on_dashboard} on_landing={on_landing} has_form={_hf} body_head={body[:80]}")
@@ -3448,7 +3459,7 @@ def menu_batch():
                 interruptible_sleep(delay)
     except KeyboardInterrupt:
         interrupted = True
-        print(f"\nBatch interrupted: {len(ok)}/{n} OK")
+        print(f"\nBatch interrupted: {len(ok)}/{n} OK (output above stays — copy what you need)")
     finally:
         try:
             signal.signal(signal.SIGINT, old_handler)
@@ -3456,6 +3467,7 @@ def menu_batch():
             pass
         clear_stop()
     if interrupted:
+        raw_input("  " + DI + "Press Enter to return to menu..." + RS)
         return
     else:
         if ok and (t in ("mailg", "cloudmail")):
