@@ -188,6 +188,30 @@ def _visible_iframe(pg, src_part):
     return False
 
 
+def confirm(png: bytes, expectation: str, timeout=120):
+    """Vision gate: does the screenshot satisfy `expectation`?
+    Returns (True/False, one-line reason). Use after every automation step."""
+    prompt = (
+        "Look at this UI screenshot. Expectation: " + expectation + "\n"
+        "Reply with exactly one line: YES or NO, then a hyphen, then a short "
+        "reason. Example: YES - dashboard with 2GB balance visible")
+    try:
+        text = _ask(png, prompt, timeout=timeout).strip().split("\n")[0]
+    except Exception as e:
+        return False, f"vision backend error: {str(e)[:80]}"
+    verdict = text[:3].upper() == "YES"
+    return verdict, text[:160]
+
+
+def confirm_page(pg, expectation: str, timeout=120):
+    """Screenshot pg and vision-confirm `expectation`. Returns (bool, reason)."""
+    try:
+        png = pg.screenshot()
+    except Exception as e:
+        return False, f"screenshot failed: {str(e)[:60]}"
+    return confirm(png, expectation, timeout=timeout)
+
+
 def visible_challenge_kind(pg):
     """Classify a visible bot challenge, or '' if none. Cheap DOM probes only."""
     try:

@@ -561,6 +561,237 @@ def create_one(tui, email, name, password, proxy_parsed, ref, vnc_mode=False,
             pass
 
 
+def _vconfirm(pg, expectation):
+    """Vision gate on the live page. Returns True/False (logs reason)."""
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(BASE / "tools"))
+        import vision_solve as _vs
+        ok, why = _vs.confirm_page(pg, expectation)
+        log(f"vision: {'YES' if ok else 'NO'} - {why}", "ok" if ok else "warn")
+        return ok
+    except Exception as e:
+        log(f"vision gate err: {str(e)[:80]}", "warn")
+        return False
+
+
+def flamingo_login(pg, email, password):
+    """Login via the auth page tabs. Returns True when dashboard reached."""
+    pg.goto(f"{AUTH_BASE}/register", wait_until="domcontentloaded", timeout=60000)
+    pg.wait_for_timeout(5000)
+    try:
+        pg.wait_for_function("() => typeof toggleTab === 'function'", timeout=20000)
+        pg.evaluate("() => toggleTab('login')")
+    except Exception:
+        pg.locator(".tab:has-text('Login')").first.click(timeout=15000)
+    pg.wait_for_selector("#login-email", state="visible", timeout=20000)
+    pg.fill("#login-email", email)
+    pg.fill("#login-password", password)
+    try:
+        pg.locator("#loginForm button[type='submit']").first.click(timeout=8000)
+    except Exception:
+        pass  # click raced a navigation — that's success, not failure
+    pg.wait_for_timeout(8000)
+    if "dashboard" not in (pg.url or ""):
+        return False
+    return _vconfirm(pg, f"Flamingo dashboard logged in as {email}, sidebar and account area visible")
+
+
+def affiliate_points(pg):
+    """Return (available_points:int, has_active_plan:bool) from affiliate page."""
+    pg.goto(f"{DASH_BASE}/affiliate", wait_until="domcontentloaded", timeout=60000)
+    pg.wait_for_timeout(5000)
+    body = pg.inner_text("body", timeout=8000)
+    pts, active = 0, False
+    m = re.search(r"Points to spend\s*(\d+)", body)
+    if m:
+        pts = int(m.group(1))
+    active = bool(re.search(r"GB left|active plan|Active Residential Plans\s*[1-9]", body, re.I))
+    return pts, active
+
+
+def redeem_50mb(pg):
+    """Click Redeem on the 50MB Standard card (+ confirm modal). Vision-gated."""
+    try:
+        card = pg.locator("div:has-text('50MB Standard')").first
+        btn = pg.locator("button:has-text('Redeem')")
+        # pick the Redeem button nearest the 50MB card
+        target = None
+        for i in range(btn.count()):
+            try:
+                box = btn.nth(i).bounding_box(timeout=2000)
+                cb = card.bounding_box(timeout=2000)
+                if box and cb and abs(box["y"] - cb["y"]) < 400:
+                    target = btn.nth(i)
+                    break
+            except Exception:
+                pass
+        target = target or btn.first
+        target.click(timeout=10000)
+        pg.wait_for_timeout(4000)
+        # confirm modal (Confirm/Yes/Redeem) if one appeared
+        for txt in ("Confirm", "Yes, redeem", "Redeem now", "Confirm redeem"):
+            try:
+                loc = pg.locator(f"button:has-text('{txt}')").first
+                if loc.count() and loc.is_visible(timeout=2000):
+                    loc.click(timeout=8000)
+                    pg.wait_for_timeout(4000)
+                    break
+            except Exception:
+                pass
+        return _vconfirm(pg, "points shop showing the 50MB plan redeemed or a success confirmation")
+    except Exception as e:
+        log(f"redeem err: {str(e)[:80]}", "warn")
+        return False
+
+
+def generate_proxies_api(pg, plan=2, qty=5, sticky=10, country="_country-id"):
+    """Call the dashboard generate-proxies API in-page (session cookies apply).
+    Returns list of dicts {host,port,user,pw}."""
+    res = pg.evaluate("""async ([payload]) => {
+        const r = await fetch('/action/generate-proxies', {method: 'POST',
+            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+            body: JSON.stringify(payload)});
+        return await r.json();
+    }""", [{"country": country, "state": "random", "city": "random",
+             "proxy_plan": plan, "proxy_amount": qty, "proxy_type": "sticky",
+             "format": "user:pass@ip:port", "ttl": sticky}])
+    out = []
+    if isinstance(res, dict) and res.get("success") and res.get("proxies"):
+        for ln in str(res["proxies"]).splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            parts = ln.split(":")
+            if len(parts) >= 4:
+                out.append({"host": parts[0], "port": parts[1],
+                            "user": parts[2], "pw": ":".join(parts[3:])})
+    return out
+
+
+def save_generated(proxies, path=None):
+    """Append generated proxies to proxy list as http://user:pass@host:port. Returns added."""
+    path = Path(path or BASE / "proxy.txt")
+    existing = set()
+    if path.exists():
+        for ln in path.read_text().splitlines():
+            if ln.strip():
+                existing.add(ln.strip())
+    added = 0
+    with open(path, "a") as f:
+        for p in proxies:
+            if not (p.get("host") and p.get("port") and p.get("user") and p.get("pw")):
+                continue
+            line = f"http://{p['user']}:{p['pw']}@{p['host']}:{p['port']}"
+            if line not in existing:
+                f.write(line + "\n")
+                existing.add(line)
+                added += 1
+    return added
+
+
+def gen_account(tui, email, password, proxy_parsed, qty, sticky, country, plan, vnc_mode):
+    """Login -> redeem if needed -> generate qty proxies -> save. Returns count saved."""
+    from playwright.sync_api import sync_playwright
+    exe = tui.preflight_browser(log_it=False, headless=not vnc_mode)
+    if not exe:
+        return 0
+    pm = _proxy_mod()
+    b = None
+    try:
+        with sync_playwright() as p:
+            launch_args = ["--no-sandbox", "--disable-dev-shm-usage",
+                           "--disable-blink-features=AutomationControlled"]
+            if proxy_parsed and proxy_parsed[1]:
+                launch_args.append("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE " + proxy_parsed[1])
+            try:
+                b = p.chromium.launch(channel="chrome", headless=not vnc_mode, args=launch_args)
+            except Exception:
+                b = p.chromium.launch(executable_path=exe, headless=not vnc_mode, args=launch_args)
+            ctx_kwargs = {"viewport": {"width": 1280, "height": 900}, "locale": "en-US"}
+            if proxy_parsed:
+                ctx_kwargs["proxy"] = pm.proxy_to_playwright(proxy_parsed)
+            ctx = b.new_context(**ctx_kwargs)
+            ctx.add_init_script(STEALTH_JS)
+            pg = ctx.new_page()
+            if not flamingo_login(pg, email, password):
+                log(f"{email}: login failed", "warn")
+                return 0
+            pts, active = affiliate_points(pg)
+            log(f"{email}: points={pts} active_plan={active}")
+            if not active and pts >= 1:
+                log(f"{email}: redeeming 50MB Standard...")
+                redeem_50mb(pg)
+                pts, active = affiliate_points(pg)
+                log(f"{email}: after redeem points={pts} active_plan={active}")
+            if not active:
+                log(f"{email}: no active plan (points={pts}) — cannot generate yet", "warn")
+                return 0
+            got = generate_proxies_api(pg, plan=plan, qty=qty, sticky=sticky, country=country)
+            log(f"{email}: generated {len(got)} proxies")
+            if not got:
+                return 0
+            added = save_generated(got)
+            # functional proof: live-check a sample (stronger than any screenshot)
+            try:
+                checked = 0
+                for g in got[:2]:
+                    r = pm.check_proxy(("http", g["host"], int(g["port"]), g["user"], g["pw"]), timeout=10)
+                    if r:
+                        checked += 1
+                log(f"{email}: live-checked {checked}/{min(2, len(got))} sample OK")
+            except Exception as e:
+                log(f"live-check err: {str(e)[:60]}", "warn")
+            _vconfirm(pg, f"dashboard for {email} with an active residential plan")
+            return added
+    except Exception as e:
+        log(f"gen {email}: {str(e)[:100]}", "warn")
+        return 0
+    finally:
+        try:
+            if b is not None:
+                b.close()
+        except Exception:
+            pass
+
+
+def gen_main(args, tui):
+    """Gen mode: for each farm account -> login, redeem, generate, save."""
+    pool = ProxyPool(args.proxy, order=args.proxy_order, max_per_proxy=0)
+    accts = []
+    if ACCOUNTS_FILE.exists():
+        for ln in ACCOUNTS_FILE.read_text().splitlines():
+            p = ln.strip().split("|")
+            if len(p) >= 4 and p[3] in ("verified", "registered", "registered-nomail", "score-retry"):
+                accts.append((p[0], p[1]))
+    if args.gen_accounts.strip():
+        want = {e.strip().lower() for e in args.gen_accounts.split(",")}
+        accts = [(e, pw) for e, pw in accts if e.lower() in want]
+    if not accts:
+        print("No farm accounts eligible for gen mode")
+        return 1
+    print(f"  TH-FLAMINGO-GEN: {len(accts)} accounts x {args.gen_qty} proxies "
+          f"(sticky {args.sticky}min, plan {args.gen_plan})")
+    total = 0
+    for i, (email, pw) in enumerate(accts, 1):
+        proxy = None if args.no_proxy else pool.pick()
+        log(f"[{i}/{len(accts)}] {email} via " + ("DIRECT" if args.no_proxy else f"{proxy[1]}:{proxy[2]}"))
+        try:
+            n = gen_account(tui, email, pw, proxy, args.gen_qty, args.sticky,
+                            args.country, args.gen_plan, args.vnc)
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            log(f"{email} gen err: {str(e)[:80]}", "warn")
+            n = 0
+        total += n
+        log(f"[{i}/{len(accts)}] {email}: +{n} proxies")
+        if i < len(accts) and args.delay > 0:
+            time.sleep(args.delay)
+    print(f"\n  GEN DONE: +{total} proxies -> proxy.txt")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="Farm FlamingoProxies referral accounts via webshare proxies")
     ap.add_argument("--count", type=int, default=1)
@@ -576,6 +807,14 @@ def main():
                     help="gmail address for google session cookies (v3 boost), or 'auto' to rotate")
     ap.add_argument("--no-proxy", action="store_true",
                     help="direct connection (exposes host IP — use for score tests)")
+    ap.add_argument("--gen-only", action="store_true",
+                    help="skip signup: login farm accounts, redeem, generate proxies -> proxy.txt")
+    ap.add_argument("--gen-accounts", default="",
+                    help="comma-separated farm emails for gen mode (default: all verified/registered)")
+    ap.add_argument("--gen-qty", type=int, default=5, help="proxies per account (default 5)")
+    ap.add_argument("--sticky", type=int, default=10, help="sticky minutes 5-30 (default 10)")
+    ap.add_argument("--country", default="_country-id", help="country id or _country-id for any")
+    ap.add_argument("--gen-plan", type=int, default=2, help="proxy_plan id (default 2=Standard)")
     ap.add_argument("--vnc", action="store_true")
     args = ap.parse_args()
 
@@ -586,6 +825,9 @@ def main():
     tui.load_cfg()
     if not tui.preflight_browser(log_it=True, headless=not args.vnc):
         return 1
+
+    if args.gen_only:
+        return gen_main(args, tui)
 
     pool = ProxyPool(args.proxy, order=args.proxy_order, max_per_proxy=args.max_per_proxy)
     if not args.no_proxy and not pool.proxies:
