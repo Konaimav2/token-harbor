@@ -257,7 +257,7 @@ def _solve_v3(api_key, provider, page_url, min_score="0.3", timeout=300):
 
 
 def create_one(tui, email, name, password, proxy_parsed, ref, vnc_mode=False,
-               captcha_key="", captcha_provider="2captcha"):  # noqa: C901
+               captcha_key="", captcha_provider="2captcha", gmail_cookies=None):  # noqa: C901
     """Register one Flamingo account. Returns status string."""
     from playwright.sync_api import sync_playwright
     exe = tui.preflight_browser(log_it=False, headless=not vnc_mode)
@@ -268,17 +268,26 @@ def create_one(tui, email, name, password, proxy_parsed, ref, vnc_mode=False,
     b = None
     try:
         with sync_playwright() as p:
-            _hrr = "MAP * ~NOTFOUND"
+            launch_args = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+                           "--disable-ipv6"]
             if proxy_parsed and proxy_parsed[1]:
-                _hrr += ", EXCLUDE " + proxy_parsed[1]
+                # Host-resolver rule must EXCLUDE the proxy host, else Chromium
+                # can't resolve the proxy itself (socks5 bridge on 127.0.0.1 is
+                # an IP literal — unaffected by DNS rules). Direct mode must
+                # NOT set MAP * ~NOTFOUND or all DNS fails.
+                launch_args.append("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE " + proxy_parsed[1])
             b = p.chromium.launch(
-                executable_path=exe, headless=not vnc_mode,
-                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-                      "--host-resolver-rules=" + _hrr, "--disable-ipv6"])
+                executable_path=exe, headless=not vnc_mode, args=launch_args)
             ctx_kwargs = {"viewport": {"width": 1280, "height": 800}}
             if proxy_parsed:
                 ctx_kwargs["proxy"] = pm.proxy_to_playwright(proxy_parsed)
             ctx = b.new_context(**ctx_kwargs)
+            if gmail_cookies:
+                try:
+                    ctx.add_cookies(gmail_cookies)
+                    log("injected google session cookies (v3 score boost)")
+                except Exception as e:
+                    log(f"cookie inject failed: {str(e)[:60]}", "warn")
             pg = ctx.new_page()
             reg_url = f"{AUTH_BASE}/register?ref={ref}" if ref else f"{AUTH_BASE}/register"
             pg.goto(reg_url, wait_until="domcontentloaded", timeout=45000)
@@ -468,6 +477,10 @@ def main():
     ap.add_argument("--password", default="")
     ap.add_argument("--captcha-key", default="")
     ap.add_argument("--captcha-provider", default="2captcha")
+    ap.add_argument("--gmail-cookie", default="",
+                    help="gmail address whose google session cookies boost the v3 score")
+    ap.add_argument("--no-proxy", action="store_true",
+                    help="direct connection (exposes host IP — use for score tests)")
     ap.add_argument("--vnc", action="store_true")
     args = ap.parse_args()
 
@@ -480,13 +493,28 @@ def main():
         return 1
 
     pool = ProxyPool(args.proxy, order=args.proxy_order, max_per_proxy=args.max_per_proxy)
-    if not pool.proxies:
+    if not args.no_proxy and not pool.proxies:
         print(f"No proxies in {args.proxy}")
         return 1
-    print(f"  TH-FLAMINGO: {args.count} accounts, ref={args.ref}, proxies={len(pool.proxies)} ({args.proxy_order})")
+    print(f"  TH-FLAMINGO: {args.count} accounts, ref={args.ref}, "
+          + ("DIRECT (no proxy)" if args.no_proxy else f"proxies={len(pool.proxies)} ({args.proxy_order})"))
 
     used = load_used()
     doms = _cloud_domains(tui)
+    gcookies = []
+    if args.gmail_cookie:
+        try:
+            cf = (Path("/root/projects/gmail-inbox/cookies")
+                  / (args.gmail_cookie.split("@")[0].replace(".", "_") + "_gmail_com.json"))
+            raw = json.loads(cf.read_text())
+            gcookies = [{"name": c["name"], "value": c["value"], "domain": c["domain"],
+                         "path": c.get("path", "/"), "secure": bool(c.get("secure", True)),
+                         "httpOnly": bool(c.get("httpOnly", False)),
+                         "sameSite": c.get("sameSite", "Lax")}
+                        for c in raw if "google.com" in c.get("domain", "")]
+            log(f"loaded {len(gcookies)} google cookies for {args.gmail_cookie}")
+        except Exception as e:
+            log(f"gmail cookies unavailable: {str(e)[:60]}", "warn")
     ok = fail = 0
     hard_ips = []
     for i in range(1, args.count + 1):
@@ -505,14 +533,16 @@ def main():
             tui.create_cloudmail_inbox(email)
         except Exception:
             pass
-        proxy = pool.pick()
-        if not proxy:
+        proxy = None if args.no_proxy else pool.pick()
+        if not proxy and not args.no_proxy:
             log("proxy pool exhausted (all capped/failed) — stopping", "warn")
             break
-        log(f"[{i}/{args.count}] Registering {email} via {proxy[1]}:{proxy[2]} ...")
+        log(f"[{i}/{args.count}] Registering {email} via "
+            + ("DIRECT" if args.no_proxy else f"{proxy[1]}:{proxy[2]}") + " ...")
         mark_used(email)
         st = create_one(tui, email, name, password, proxy, args.ref, vnc_mode=args.vnc,
-                        captcha_key=args.captcha_key, captcha_provider=args.captcha_provider)
+                        captcha_key=args.captcha_key, captcha_provider=args.captcha_provider,
+                        gmail_cookies=gcookies or None)
         save_account(email, password, name, st)
         if st == "verified":
             ok += 1
