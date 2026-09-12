@@ -66,7 +66,11 @@ def run_one(m, c, index, total, email=None, password=None, skip_inbox=False, rmo
             m.log(f"{tag} Starting: {email}", "arr")
             r = m.run_full_flow(c, email, password=password, skip_inbox=skip_inbox)
         if r:
-            m.log(f"{tag} DONE: {email} key={str(r.get('api_key'))[:12]}... verified={r.get('verified')} free={r.get('free_ok')} ({int(time.time()-start)}s)", "ok")
+            try:
+                fp = m._key_fingerprint(str(r.get('api_key', '')))[:12]
+            except Exception:
+                fp = "n/a"
+            m.log(f"{tag} DONE: {email} key_fp={fp} verified={r.get('verified')} free={r.get('free_ok')} ({int(time.time()-start)}s)", "ok")
             return True
         m.log(f"{tag} FAILED: {email}", "no")
         return False
@@ -168,11 +172,19 @@ def main():
     # Use reusable_queue directly — it already contains all emails (reuse + fresh)
     reusable_lock = threading.Lock()
 
+    stop = getattr(m, "STOP_EVENT", None)
+    if stop is None:
+        import threading as _th
+        stop = _th.Event()
+        m.STOP_EVENT = stop
+    else:
+        stop.clear()
+
     def worker():
         nonlocal done, ok, fail
-        while True:
+        while not stop.is_set():
             with _lock:
-                if not queue:
+                if not queue or stop.is_set():
                     return
                 idx = queue.pop(0)
             # resolve email — pop from reusable_queue (prioritizes unused + pending before fresh)
@@ -186,21 +198,48 @@ def main():
                     skip_inbox = (rmode == "reuse_unused")
             m.log(f"[{idx}/{count}] {('Re-verifying' if rmode=='reverify_pending' else 'Starting')} {email} ({rmode or 'fresh'})", "arr")
             success = run_one(m, c, idx + 1, count, email=email, password=password, skip_inbox=skip_inbox, rmode=rmode)
+            # local fatal: stop whole farm, don't burn remaining queue
+            try:
+                if c.pop("_batch_local_fatal", None):
+                    m.log("Farm aborting: local browser failure", "no")
+                    with _lock:
+                        queue.clear()
+                    stop.set()
+                    with _lock:
+                        done += 1
+                        fail += 1
+                    return
+            except Exception:
+                pass
             with _lock:
                 done += 1
                 if success:
                     ok += 1
                 else:
                     fail += 1
-            # ratelimit delay
-            if delay > 0:
-                time.sleep(delay)
+            # ratelimit delay (cooperative — wakes on Ctrl+C)
+            if delay > 0 and not stop.is_set():
+                stop.wait(delay)
 
     threads = [threading.Thread(target=worker, daemon=True) for _ in range(min(workers, count))]
     for th in threads:
         th.start()
-    for th in threads:
-        th.join()
+    try:
+        while any(th.is_alive() for th in threads):
+            for th in threads:
+                th.join(0.2)
+            if stop.is_set() and not queue:
+                break
+    except KeyboardInterrupt:
+        stop.set()
+        try:
+            with _lock:
+                queue.clear()
+        except Exception:
+            pass
+        print("\n  Farm interrupted — waiting for workers…")
+        for th in threads:
+            th.join(5)
 
     print("\n" + "=" * 50)
     print(f"  FARM DONE: {ok} ok / {fail} fail / {count} total")

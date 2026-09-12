@@ -384,21 +384,31 @@ _RAW_SAVED = None
 
 
 def raw_start():
-    """Enter raw mode once and hold it (prevents escape-byte leaks to cooked input()).
-    Keeps OPOST/ONLCR so \n still returns the carriage (no diagonal stagger)."""
+    """Enter cbreak-ish mode (no echo, no canonical) but KEEP ISIG so Ctrl+C
+    still generates SIGINT while blocked in Playwright/sleep/join."""
     global _RAW_HELD, _RAW_SAVED
     if _RAW_HELD:
         return
-    fd = sys.stdin.fileno()
+    try:
+        fd = sys.stdin.fileno()
+    except Exception as _e:
+        print(f"[swallow th-tui.py:395] {_e}")
+        return
     try:
         _RAW_SAVED = termios.tcgetattr(fd)
-        tty.setraw(fd)
-        # re-enable output post-processing: \n must also \r (else lines stagger diagonally)
+        _RAW_HELD = True  # mark BEFORE mutating so failures still restore
+        tty.setcbreak(fd)
+        # ensure ISIG stays on (setcbreak keeps it, setraw would clear it)
         import termios as _t
         attrs = _t.tcgetattr(fd)
+        # lflag is index 3: re-enable ISIG explicitly
+        try:
+            attrs[3] |= _t.ISIG
+        except Exception:
+            pass
+        # re-enable output post-processing: \n must also \r (else lines stagger diagonally)
         attrs[1] |= _t.OPOST | _t.ONLCR
         _t.tcsetattr(fd, _t.TCSADRAIN, attrs)
-        _RAW_HELD = True
     except Exception as _e:
         print(f"[swallow th-tui.py:395] {_e}")
         pass
@@ -431,19 +441,36 @@ def _kdump(c, tag):
 
 # Global interrupt flag for Ctrl+C during batch
 _BATCH_INTERRUPT = False
+STOP_EVENT = threading.Event()
 
-def _batch_sigint_handler(sig, frame):
+
+def request_stop():
     global _BATCH_INTERRUPT
     _BATCH_INTERRUPT = True
+    STOP_EVENT.set()
+
+
+def clear_stop():
+    global _BATCH_INTERRUPT
+    _BATCH_INTERRUPT = False
+    STOP_EVENT.clear()
+
+
+def _batch_sigint_handler(sig, frame):
+    request_stop()
     raise KeyboardInterrupt
 
 def interruptible_sleep(seconds, label=""):
-    """Sleep that can be interrupted by Ctrl+C."""
+    """Sleep that can be interrupted by Ctrl+C (flag or STOP_EVENT)."""
     end = time.time() + seconds
     while time.time() < end:
-        if _BATCH_INTERRUPT:
+        if _BATCH_INTERRUPT or STOP_EVENT.is_set():
             raise KeyboardInterrupt
-        time.sleep(min(1, end - time.time()))
+        # wait on the event so Ctrl+C via request_stop wakes us immediately
+        remaining = end - time.time()
+        if remaining <= 0:
+            break
+        STOP_EVENT.wait(min(1, remaining))
 
 
 def get_key():
@@ -792,9 +819,44 @@ def load_cfg():
             "batch_delay": 30, "dot_trick": False}
 
 
+def _atomic_write_text(path, text, mode=0o600):
+    """Atomic write: tmp + flush + fsync + os.replace. Never truncates in place."""
+    import tempfile
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix="." + path.name + ".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+        try:
+            os.chmod(tmp, mode)
+        except Exception:
+            pass
+        os.replace(tmp, path)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except Exception:
+            pass
+
+
+def _has_record_delimiter(*vals):
+    for v in vals:
+        s = str(v or "")
+        if "|" in s or "\n" in s or "\r" in s:
+            return True
+    return False
+
+
 def save_cfg(c):
     try:
-        CFG_FILE.write_text(json.dumps(c, indent=2))
+        _atomic_write_text(CFG_FILE, json.dumps(c, indent=2), mode=0o600)
     except Exception as e:
         elog(f"save config: {e}", traceback.format_exc())
 
@@ -841,8 +903,20 @@ def load_used():
 
 def mark_used(e):
     try:
+        el = (e or "").strip().lower()
+        if not el or "@" not in el:
+            return
+        # dedupe: keys.txt already implies used; skip double-append
+        try:
+            if USED_FILE.exists():
+                with open(USED_FILE) as f:
+                    for line in f:
+                        if line.strip().lower() == el:
+                            return
+        except Exception:
+            pass
         with open(USED_FILE, "a") as f:
-            f.write(e.lower() + "\n")
+            f.write(el + "\n")
     except Exception as ex:
         elog(f"mark_used: {e}", str(ex))
 
@@ -1222,10 +1296,14 @@ def find_verify_link(msgs):
 def resend_verification(email, password):
     """Log into TokenHarbor and click 'Verify email' / resend."""
     log(f"Resending verification for {email}...", "arr")
+    _re_exe = preflight_browser(log_it=False)
+    if not _re_exe:
+        elog("resend aborted: no usable browser executable")
+        return False
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
-            b = p.chromium.launch(executable_path="/usr/bin/chromium-browser", headless=True,
+            b = p.chromium.launch(executable_path=_re_exe, headless=True,
                                   args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
             ctx = b.new_context(viewport={"width": 1280, "height": 720})
             pg = ctx.new_page()
@@ -1314,8 +1392,12 @@ def _open_link(link):
     try:
         from playwright.sync_api import sync_playwright
         from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+        _ol_exe = preflight_browser(log_it=False)
+        if not _ol_exe:
+            elog("open verify link aborted: no usable browser executable")
+            return False
         with sync_playwright() as p:
-            b = p.chromium.launch(executable_path="/usr/bin/chromium-browser", headless=True,
+            b = p.chromium.launch(executable_path=_ol_exe, headless=True,
                                   args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
             ctx = b.new_context()
             pg = ctx.new_page()
@@ -1420,7 +1502,11 @@ def verify_via_mailg(email, password="", api_key="", retries=10, delay=15):
             log("Verified!", "ok")
             return True
         log(f"No link yet ({i}/{retries}), waiting {delay}s...", "info")
-        time.sleep(delay)
+        try:
+            interruptible_sleep(delay)
+        except KeyboardInterrupt:
+            log("Verification cancelled by user", "warn")
+            raise
     log("Verification link not found after all retries", "warn")
     return False
 
@@ -1454,7 +1540,11 @@ def verify_via_cloudmail(email, password="", api_key="", retries=10, delay=15):
             log(f"Verified: {email}", "ok")
             return True
         dlog(f"No link yet for {email} ({i}/{retries}), waiting {delay}s...")
-        time.sleep(delay)
+        try:
+            interruptible_sleep(delay)
+        except KeyboardInterrupt:
+            log("Verification cancelled by user", "warn")
+            raise
     log(f"Verification failed for {email}", "warn")
     return False
 
@@ -1493,6 +1583,91 @@ def _ensure_deps(feature, auto=True):
 
 
 _LOCAL_PROXY_READY = False
+
+# ── browser executable resolver (fail-fast, no relative paths) ──
+_BROWSER_CANDIDATES = [
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/opt/google/chrome/google-chrome",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/chromium",
+]
+_BROWSER_RESOLVED = None
+
+
+def resolve_browser_executable():
+    """Return an ABSOLUTE browser executable path, or None.
+
+    Playwright does NOT do $PATH lookup for executable_path — a bare
+    "google-chrome" is stat'ed literally (./google-chrome) and always fails
+    with `executable doesn't exist at google-chrome`. Never return relative.
+    Prefers real google-chrome over the snap shim chromium-browser.
+    """
+    global _BROWSER_RESOLVED
+    if _BROWSER_RESOLVED and os.path.isfile(_BROWSER_RESOLVED) and os.access(_BROWSER_RESOLVED, os.X_OK):
+        return _BROWSER_RESOLVED
+    # explicit override wins (must still be absolute + executable)
+    for env_key in ("CHROME_PATH", "BROWSER_PATH", "PLAYWRIGHT_CHROME_PATH"):
+        v = (os.environ.get(env_key) or "").strip()
+        if v and os.path.isabs(v) and os.path.isfile(v) and os.access(v, os.X_OK):
+            _BROWSER_RESOLVED = v
+            return v
+    # $PATH lookup via which (always absolute when found)
+    for name in ("google-chrome", "google-chrome-stable", "chromium-browser", "chromium"):
+        w = shutil.which(name)
+        if w and os.path.isabs(w) and os.path.isfile(w):
+            # skip snap shim when a real chrome exists later in candidates;
+            # prefer google-chrome family first
+            if "snap" in (w or ""):
+                continue
+            try:
+                # resolve /etc/alternatives symlinks to the real binary
+                real = os.path.realpath(w)
+                if os.path.isfile(real) and os.access(real, os.X_OK):
+                    # deprioritize snap shim: only use if nothing better found
+                    if "snap" in real:
+                        continue
+                    _BROWSER_RESOLVED = real
+                    return real
+            except Exception:
+                pass
+            if os.access(w, os.X_OK):
+                _BROWSER_RESOLVED = w
+                return w
+    # absolute candidates (handles minimal PATH, incl. snap shim last resort)
+    for p in _BROWSER_CANDIDATES:
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            # resolve alternatives (e.g. /usr/bin/google-chrome -> .../google-chrome)
+            try:
+                real = os.path.realpath(p)
+                if os.path.isfile(real) and os.access(real, os.X_OK):
+                    _BROWSER_RESOLVED = real
+                    return real
+            except Exception:
+                pass
+            _BROWSER_RESOLVED = p
+            return p
+    return None
+
+
+def preflight_browser(log_it=True):
+    """Fail-fast check before any batch: returns path or None (logs reason)."""
+    exe = resolve_browser_executable()
+    if exe:
+        return exe
+    if log_it:
+        elog("browser preflight failed: no usable chrome/chromium found "
+             "(checked $PATH google-chrome/chromium + /usr/bin/google-chrome, "
+             "/opt/google/chrome/google-chrome, /usr/bin/chromium-browser). "
+             "Refusing to burn proxies/emails.")
+    return None
+
+
+def _is_local_browser_fatal(exc_text):
+    t = (exc_text or "").lower()
+    return ("executable doesn't exist" in t or "executable does not exist" in t
+            or "failed to launch" in t and ("executable" in t or "browser" in t)
+            or "no usable browser" in t)
 
 def _ensure_local_proxy():
     """Ensure the bundled proxy-controller is running (start if not). Returns True if up.
@@ -1775,12 +1950,34 @@ def _solve_captcha(pg, c, timeout=180):
 
 
 def _shot_fail(pg, email):
-    """Save a diagnostic screenshot on signup failure."""
+    """Save a diagnostic screenshot on signup failure (debug-gated, 0600, TTL)."""
     try:
+        if os.environ.get("TH_SCREENSHOTS", "") != "1":
+            return None
         _dir = BASE / "debug_shots"
         _dir.mkdir(exist_ok=True)
-        _shot = _dir / f"signup_fail_{email.split('@')[0]}_{int(time.time())}.png"
+        try:
+            os.chmod(_dir, 0o700)
+        except Exception:
+            pass
+        safe = re.sub(r"[^a-z0-9]", "", (email.split("@")[0] if "@" in (email or "") else "x").lower())[:16] or "x"
+        _shot = _dir / f"signup_fail_{safe}_{int(time.time())}_{os.getpid()}.png"
         pg.screenshot(path=str(_shot), full_page=True)
+        try:
+            os.chmod(_shot, 0o600)
+        except Exception:
+            pass
+        # TTL purge: delete shots older than 72h
+        try:
+            now = time.time()
+            for old in _dir.glob("signup_fail_*.png"):
+                try:
+                    if now - old.stat().st_mtime > 72 * 3600:
+                        old.unlink()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         log(f"Screenshot saved: {_shot}", "info")
         return str(_shot)
     except Exception as _e:
@@ -1867,8 +2064,11 @@ def _start_vnc_stack():
         log("Started Xvfb :99", "ok" if _port_open(5900) or _sp.call("pgrep -x Xvfb >/dev/null 2>&1", shell=True) == 0 else "err")
     # 2. x11vnc — port 5900 check
     if not _port_open(5900):
+        if "\n" in auth_xs or "\x00" in auth_xs:
+            elog("VNC password contains newline/NUL — refusing to store")
+            return
         if not os.path.exists("/run/x11vnc-passwd"):
-            _sp.run('x11vnc -storepasswd "%s" /run/x11vnc-passwd' % auth_xs, shell=True)
+            _sp.run(["x11vnc", "-storepasswd", auth_xs, "/run/x11vnc-passwd"])
             try:
                 os.chmod("/run/x11vnc-passwd", 0o600)
             except Exception as _e:
@@ -1876,7 +2076,7 @@ def _start_vnc_stack():
                 pass
         elif os.environ.get("VNC_PASSWORD") or _env_vnc_pw():
             try:
-                _sp.run('x11vnc -storepasswd "%s" /run/x11vnc-passwd' % auth_xs, shell=True)
+                _sp.run(["x11vnc", "-storepasswd", auth_xs, "/run/x11vnc-passwd"])
                 os.chmod("/run/x11vnc-passwd", 0o600)
             except Exception as _e:
                 print(f"[swallow th-tui.py:1851] {_e}")
@@ -1939,6 +2139,11 @@ def create_account(c, email=None, password=None, _retry=True):
         print(f"[swallow th-tui.py:1929] {_e}")
         pw_timeout_ms = 120000
     _ensure_deps("curl_cffi")
+    # browser preflight FIRST — never burn proxies/emails on a missing binary
+    browser_exe = preflight_browser(log_it=True)
+    if not browser_exe:
+        c["_local_fatal"] = "no usable browser executable"
+        return None
     # proxy handling
     pm = _load_proxy_mod()
     pcfg = c.get("proxy", {})
@@ -1952,6 +2157,9 @@ def create_account(c, email=None, password=None, _retry=True):
             proxy_parsed = pm.vpngate_proxy()
             if proxy_parsed:
                 dlog(f"Using VPNGate residential: {proxy_parsed[1]} for {email}")
+    b = None
+    ctx = None
+    pg = None
     try:
         with sync_playwright() as p:
             # Host-resolver rule must EXCLUDE the proxy host, else Chromium can't
@@ -1960,14 +2168,21 @@ def create_account(c, email=None, password=None, _retry=True):
             _hrr = "MAP * ~NOTFOUND"
             if proxy_parsed and proxy_parsed[1]:
                 _hrr += ", EXCLUDE " + proxy_parsed[1]
-            launch_kwargs = {"executable_path": "/usr/bin/chromium-browser", "headless": headless,
+            launch_kwargs = {"executable_path": browser_exe, "headless": headless,
                              "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
                                       "--disable-features=UseDnsHttpsSvcbAlpn",
                                       "--host-resolver-rules=" + _hrr,
                                       "--disable-ipv6",
                                       "--webrtc-ip-handling-policy=disable_non_proxied_udp",
                                       "--disable-rtc-smoothness-algorithm"]}
-            b = p.chromium.launch(**launch_kwargs)
+            try:
+                b = p.chromium.launch(**launch_kwargs)
+            except Exception as le:
+                if _is_local_browser_fatal(str(le)):
+                    c["_local_fatal"] = f"browser launch failed: {le}"[:200]
+                    elog(f"LOCAL FATAL (not proxy): {le}", "")
+                    return None
+                raise
             ctx_kwargs = {"viewport": {"width": 1280, "height": 720}}
             if proxy_parsed and pm:
                 ctx_kwargs["proxy"] = pm.proxy_to_playwright(proxy_parsed)
@@ -2188,11 +2403,15 @@ def create_account(c, email=None, password=None, _retry=True):
                     b.close()
                     return None
     except Exception as e:
-        elog(f"create account {email}: {e}", traceback.format_exc()[:200])
+        if _is_local_browser_fatal(str(e)):
+            c["_local_fatal"] = f"browser failed: {e}"[:200]
+            elog(f"LOCAL FATAL (not proxy): create account {email}: {e}", "")
+        else:
+            elog(f"create account {email}: {e}", traceback.format_exc()[:200])
         try:
-            b.close()
-        except Exception as _e:
-            print(f"[swallow th-tui.py:2153] {_e}")
+            if b is not None:
+                b.close()
+        except Exception:
             pass
         return None
 
@@ -2596,7 +2815,8 @@ def open_verify_link(link):
     import webbrowser
     try:
         if os.environ.get("DISPLAY"):
-            subprocess.Popen(["chromium-browser", "--no-sandbox", link],
+            _ovl_exe = resolve_browser_executable() or "google-chrome"
+            subprocess.Popen([_ovl_exe, "--no-sandbox", link],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return
     except Exception as _e:
@@ -2653,16 +2873,31 @@ def run_full_flow(c, email=None, password=None, pm=None, provider_hint=None, ski
             log(f"SKIP {email}: no inbox", "no")
             return None
     # 1. CREATE (with proxy rotation: fail 3x → rotate proxy → retry same account)
+    # Fail fast on deterministic local errors — never burn 30 attempts/proxies.
+    if not preflight_browser(log_it=True):
+        c["_local_fatal"] = "no usable browser executable (preflight)"
+        log("Aborting: no usable browser — fix chrome install, not proxies", "no")
+        return None
+    c.pop("_local_fatal", None)
     log(f"Registering {email}...", "arr")
     r = None
     max_attempts = 30  # up to 10 proxy rotations × 3 tries each — NEVER give up on the account
     proxy_fail_count = 0
     for attempt in range(1, max_attempts + 1):
+        if STOP_EVENT.is_set() or _BATCH_INTERRUPT:
+            log(f"Cancelled {email} (stop requested)", "warn")
+            return None
         c.pop("_last_fail_ratelimit", None)
+        c.pop("_local_fatal", None)
         r = create_account(c, email=email, password=password)
         if r:
             dlog(f"Account created for {email}")
             break
+        if c.get("_local_fatal"):
+            msg = c.pop("_local_fatal", "local fatal")
+            log(f"Aborting {email}: {msg} (not a proxy failure — fix locally, proxies untouched)", "no")
+            c["_batch_local_fatal"] = msg
+            return None
         if c.get("_email_terminal"):
             c.pop("_email_terminal", None)
             log(f"{email} terminal (already registered) — moving to next email", "warn")
@@ -2890,6 +3125,9 @@ def merge_key_record(rec, verified=False, free_ok=False):
     status = new_status
     if old_status and _rank.get(old_status, 0) > _rank.get(new_status, 0) and rec.get("api_key"):
         status = old_status  # keep the better existing state
+    if _has_record_delimiter(email, rec.get('password', ''), rec.get('api_key', ''), status):
+        elog(f"refusing to write record with delimiter (|/newline) for {email}")
+        return False
     new_line = f"{email}|{rec['password']}|{rec.get('api_key','')}|{status}"
     lines = []
     if KEYS_FILE.exists():
@@ -2908,7 +3146,7 @@ def merge_key_record(rec, verified=False, free_ok=False):
     if not inserted:
         kept.append(new_line)
     try:
-        KEYS_FILE.write_text("\n".join(kept) + "\n")
+        _atomic_write_text(KEYS_FILE, "\n".join(kept) + "\n", mode=0o600)
     except Exception as e:
         elog("merge key record: " + str(e))
         return False
@@ -2918,88 +3156,110 @@ def merge_key_record(rec, verified=False, free_ok=False):
 
 def menu_create():
     c = load_cfg()
-    ms = get_active_mail(c)
-    # Public tempmail path — no mail server configured but tempmail option on
-    if (not ms) and c.get("proxy", {}).get("use_public_tempmail"):
-        pm = _load_proxy_mod()
-        if not pm:
-            log("th-proxy.py missing", "warn")
-            raw_input("  " + DI + "Press Enter" + RS)
-            return
-        addr = pm.get_tempmail_from_pool() or pm.get_public_tempmail()
-        if not addr:
-            log("Public tempmail creation failed", "warn")
-            raw_input("  " + DI + "Press Enter" + RS)
-            return
-        log("Public tempmail: " + addr, "ok")
-        run_full_flow(c, addr, pm=pm)
+    if not preflight_browser(log_it=True):
+        log("Create aborted: no usable browser executable", "no")
         raw_input("  " + DI + "Press Enter" + RS)
         return
-    if not ms:
-        log("No mail server configured! Go to Settings first.", "warn")
-        raw_input("  " + DI + "Press Enter" + RS)
-        return
-    t = ms.get("type", "")
-    mname = ms.get("name", "?")
-    print(f"  Mail: {W}{mname}{RS}\n")
-
-    if t == "mailg":
-        accs = get_mailg_accounts()
-        used = load_used()
-        items = []
-        for a in accs:
-            st = "USED" if a.lower() in used else "FRESH"
-            sub = f"{G}Fresh{RS}" if st == "FRESH" else f"{R}Used{RS}"
-            items.append((a, a.split("@")[0], sub))
-        if not items:
-            log("No mailg accounts found in DB!", "warn")
-            raw_input("  " + DI + "Press Enter" + RS)
-            return
-        sel = pick_multi("Select Gmail Accounts", items, searchable=True)
-        if not sel:
-            log("No accounts selected!", "warn")
-            raw_input("  " + DI + "Press Enter" + RS)
-            return
-        for email in sel:
-            run_full_flow(c, email)
-    elif t == "cloudmail":
-        choice = pick_one("Cloud Mail - Select Option", [
-            ("existing", "Use existing inbox", "From credentials file"),
-            ("new", "Create new inbox", "Pick domain & generate"),
-        ])
-        if not choice:
-            raw_input("  " + DI + "Press Enter" + RS)
-            return
-        if choice[0] == "existing":
-            addrs = get_cloudmail_addresses()
-            items = [(a, a.split("@")[0], a.split("@")[1] if "@" in a else "") for a in addrs]
-            if not items:
-                log("No cloudmail addresses found!", "warn")
+    clear_stop()
+    try:
+        ms = get_active_mail(c)
+        # Public tempmail path — no mail server configured but tempmail option on
+        if (not ms) and c.get("proxy", {}).get("use_public_tempmail"):
+            pm = _load_proxy_mod()
+            if not pm:
+                log("th-proxy.py missing", "warn")
                 raw_input("  " + DI + "Press Enter" + RS)
                 return
-            sel = pick_multi("Select Cloudmail Inbox", items, searchable=True)
+            addr = pm.get_tempmail_from_pool() or pm.get_public_tempmail()
+            if not addr:
+                log("Public tempmail creation failed", "warn")
+                raw_input("  " + DI + "Press Enter" + RS)
+                return
+            log("Public tempmail: " + addr, "ok")
+            run_full_flow(c, addr, pm=pm)
+            raw_input("  " + DI + "Press Enter" + RS)
+            return
+        if not ms:
+            log("No mail server configured! Go to Settings first.", "warn")
+            raw_input("  " + DI + "Press Enter" + RS)
+            return
+        t = ms.get("type", "")
+        mname = ms.get("name", "?")
+        print(f"  Mail: {W}{mname}{RS}\n")
+
+        if t == "mailg":
+            accs = get_mailg_accounts()
+            used = load_used()
+            items = []
+            for a in accs:
+                st = "USED" if a.lower() in used else "FRESH"
+                sub = f"{G}Fresh{RS}" if st == "FRESH" else f"{R}Used{RS}"
+                items.append((a, a.split("@")[0], sub))
+            if not items:
+                log("No mailg accounts found in DB!", "warn")
+                raw_input("  " + DI + "Press Enter" + RS)
+                return
+            sel = pick_multi("Select Gmail Accounts", items, searchable=True)
             if not sel:
+                log("No accounts selected!", "warn")
                 raw_input("  " + DI + "Press Enter" + RS)
                 return
             for email in sel:
-                # inbox already exists (picked from list) — skip inbox creation
-                run_full_flow(c, email, skip_inbox=True)
-        elif choice[0] == "new":
-            domains = get_cloudmail_domains()
-            items = [(d, d, "") for d in domains]
-            dom = pick_one("Select Domain", items)
-            if not dom:
+                if STOP_EVENT.is_set() or _BATCH_INTERRUPT:
+                    log("Create cancelled by user", "warn")
+                    break
+                run_full_flow(c, email)
+                if c.pop("_batch_local_fatal", None):
+                    log("Create aborted: local browser failure (remaining emails untouched)", "no")
+                    break
+        elif t == "cloudmail":
+            choice = pick_one("Cloud Mail - Select Option", [
+                ("existing", "Use existing inbox", "From credentials file"),
+                ("new", "Create new inbox", "Pick domain & generate"),
+            ])
+            if not choice:
                 raw_input("  " + DI + "Press Enter" + RS)
                 return
-            prefix = raw_input("  Email prefix (empty=random): ").strip()
-            if not prefix:
-                prefix = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
-            email = prefix + "@" + dom[0]
-            if create_cloudmail_inbox(email):
-                log("Inbox created: " + email, "ok")
-                run_full_flow(c, email)
-            else:
-                log("Failed to create cloudmail inbox: " + email, "no")
+            if choice[0] == "existing":
+                addrs = get_cloudmail_addresses()
+                items = [(a, a.split("@")[0], a.split("@")[1] if "@" in a else "") for a in addrs]
+                if not items:
+                    log("No cloudmail addresses found!", "warn")
+                    raw_input("  " + DI + "Press Enter" + RS)
+                    return
+                sel = pick_multi("Select Cloudmail Inbox", items, searchable=True)
+                if not sel:
+                    raw_input("  " + DI + "Press Enter" + RS)
+                    return
+                for email in sel:
+                    if STOP_EVENT.is_set() or _BATCH_INTERRUPT:
+                        log("Create cancelled by user", "warn")
+                        break
+                    # inbox already exists (picked from list) — skip inbox creation
+                    run_full_flow(c, email, skip_inbox=True)
+                    if c.pop("_batch_local_fatal", None):
+                        log("Create aborted: local browser failure", "no")
+                        break
+            elif choice[0] == "new":
+                domains = get_cloudmail_domains()
+                items = [(d, d, "") for d in domains]
+                dom = pick_one("Select Domain", items)
+                if not dom:
+                    raw_input("  " + DI + "Press Enter" + RS)
+                    return
+                prefix = raw_input("  Email prefix (empty=random): ").strip()
+                if not prefix:
+                    prefix = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+                email = prefix + "@" + dom[0]
+                if create_cloudmail_inbox(email):
+                    log("Inbox created: " + email, "ok")
+                    run_full_flow(c, email)
+                else:
+                    log("Failed to create cloudmail inbox: " + email, "no")
+    except KeyboardInterrupt:
+        log("Create cancelled by user", "warn")
+    finally:
+        clear_stop()
     raw_input("  " + DI + "Press Enter to continue..." + RS)
 
 
@@ -3030,11 +3290,17 @@ def menu_batch():
             log(f"Capping batch to {len(avail)}", "info")
             n = len(avail)
     global _BATCH_INTERRUPT
-    _BATCH_INTERRUPT = False
+    clear_stop()
+    # browser preflight BEFORE installing handler — abort batch with zero burn
+    if not preflight_browser(log_it=True):
+        log("Batch aborted: no usable browser executable", "no")
+        raw_input("  " + DI + "Press Enter" + RS)
+        return
     old_handler = signal.signal(signal.SIGINT, _batch_sigint_handler)
+    interrupted = False
     try:
         for i in range(n):
-            if _BATCH_INTERRUPT:
+            if _BATCH_INTERRUPT or STOP_EVENT.is_set():
                 raise KeyboardInterrupt
             pct = (i + 1) * 100 // n
             # separate line for progress so it doesn't overwrite account logs
@@ -3053,8 +3319,12 @@ def menu_batch():
                     log("All gmails registered — pool exhausted", "warn")
                     break
             r = run_full_flow(c, email) if email else run_full_flow(c)
-            if _BATCH_INTERRUPT:
+            if _BATCH_INTERRUPT or STOP_EVENT.is_set():
                 raise KeyboardInterrupt
+            # deterministic local failure: stop whole batch, not next account
+            if c.pop("_batch_local_fatal", None):
+                log("Batch aborted: local browser failure (proxies/emails untouched)", "no")
+                break
             if r:
                 ok.append(r)
                 print(f"  ✓ {r.get('email','') if isinstance(r, dict) else (email or '')} OK")
@@ -3065,7 +3335,16 @@ def menu_batch():
                 log(f"Waiting {delay}s to avoid rate-limit...", "info")
                 interruptible_sleep(delay)
     except KeyboardInterrupt:
+        interrupted = True
         print(f"\nBatch interrupted: {len(ok)}/{n} OK")
+    finally:
+        try:
+            signal.signal(signal.SIGINT, old_handler)
+        except Exception:
+            pass
+        clear_stop()
+    if interrupted:
+        return
     else:
         if ok and (t in ("mailg", "cloudmail")):
             # verification already done inside run_full_flow
@@ -3293,9 +3572,12 @@ def menu_tokens():
             log("Checking " + str(len(checkable)) + " API keys (parallel)...", "arr")
             import concurrent.futures as _cf
             results = {}
-            with _cf.ThreadPoolExecutor(max_workers=min(8, len(checkable))) as pool:
+            pool = _cf.ThreadPoolExecutor(max_workers=min(8, len(checkable)))
+            try:
                 fut_map = {pool.submit(_test_key, rec["api_key"]): rec for rec in checkable}
                 for fut in _cf.as_completed(fut_map):
+                    if STOP_EVENT.is_set() or _BATCH_INTERRUPT:
+                        raise KeyboardInterrupt
                     rec = fut_map[fut]
                     try:
                         works, why = fut.result()
@@ -3319,6 +3601,15 @@ def menu_tokens():
                         rec["status"] = "verified"
                         _save_keys(keys)
 
+            except KeyboardInterrupt:
+                log("Key check cancelled by user", "warn")
+                for _fut in list(fut_map):
+                    _fut.cancel()
+                pool.shutdown(wait=False, cancel_futures=True)
+                clear_stop()
+                raw_input("  " + DI + "Press Enter to continue..." + RS)
+                continue
+            pool.shutdown(wait=True)
             save_key_checks(checks)
             state_counts = {m: 0 for m in ("live", "ratelimited", "planlimited", "invalid", "forbidden", "failed")}
             for rec in checkable:
@@ -4461,9 +4752,9 @@ def main():
         elog("Cannot start: live credentials (.env) missing. See .env.example")
         sys.exit(1)
     load_cfg()
-    raw_start()          # hold raw mode for the whole session (no echo, arrows don't leak)
-    enter_fullscreen()   # tmux/vim-style full control until exit
     try:
+        raw_start()          # cbreak mode with ISIG kept (Ctrl+C still SIGINT)
+        enter_fullscreen()   # tmux/vim-style full control until exit
         while True:
             require_terminal(MIN_TERM_COLS, 15, "Main Menu")
             cls()
