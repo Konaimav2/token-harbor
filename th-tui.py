@@ -1566,17 +1566,33 @@ def _load_proxy_mod():
 
 
 def _ensure_deps(feature, auto=True):
-    """Lazy-install a feature's dependencies via th-deps."""
+    """Lazy-install a feature's dependencies via th-deps.
+
+    Looks for th-deps.py in config/ first, then scripts/ (fresh clones may
+    lack config/), else falls back to a bare import check so a preinstalled
+    env never hard-fails account creation.
+    """
+    import importlib.util as _ilu
+    for _rel in ("config/th-deps.py", "scripts/th-deps.py"):
+        try:
+            spec = _ilu.spec_from_file_location("thdeps", str(BASE / _rel))
+            if spec and spec.loader:
+                m = _ilu.module_from_spec(spec)
+                spec.loader.exec_module(m)
+                ok, missing = m.ensure(feature, auto=auto)
+                if auto and not ok:
+                    log("Missing deps for " + feature + ": " + str(missing), "warn")
+                return ok
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            elog("deps: " + str(e))
+            return False
+    # no th-deps.py anywhere — bare import check (never block a ready env)
     try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("thdeps", str(BASE / "config" / "th-deps.py"))
-        if spec and spec.loader:
-            m = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(m)
-            ok, missing = m.ensure(feature, auto=auto)
-            if auto and not ok:
-                log("Missing deps for " + feature + ": " + str(missing), "warn")
-            return ok
+        mods = {"playwright": ("playwright",), "curl_cffi": ("curl_cffi",),
+                "camoufox": ("camoufox",), "proxy_check": ("requests",)}.get(feature, ())
+        return all(_ilu.find_spec(x) is not None for x in mods)
     except Exception as e:
         elog("deps: " + str(e))
     return False
@@ -1584,7 +1600,10 @@ def _ensure_deps(feature, auto=True):
 
 _LOCAL_PROXY_READY = False
 
-# ── browser executable resolver (fail-fast, no relative paths) ──
+# ── browser executable resolver: own bundled chromium first, host fallback ──
+# Playwright does NOT do $PATH lookup for executable_path — a bare
+# "google-chrome" is stat'ed literally (./google-chrome) and always fails
+# with `executable doesn't exist at google-chrome`. Always absolute.
 _BROWSER_CANDIDATES = [
     "/usr/bin/google-chrome",
     "/usr/bin/google-chrome-stable",
@@ -1593,26 +1612,90 @@ _BROWSER_CANDIDATES = [
     "/usr/bin/chromium",
 ]
 _BROWSER_RESOLVED = None
+_BROWSER_AUTO_TRIED = False
+# cdn.playwright.dev is unreachable from some hosts; npmmirror carries the
+# same builds (verified: .../builds/cft/.../chrome-linux.zip -> 200).
+_PW_MIRROR = "https://npmmirror.com/mirrors/playwright"
 
 
-def resolve_browser_executable():
+def _playwright_browser_root():
+    return os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or os.path.join(
+        os.path.expanduser("~"), ".cache", "ms-playwright")
+
+
+def bundled_chromium_exe(headless=True):
+    """Absolute path of our OWN playwright-bundled chromium, or None.
+
+    Prefers the full chromium build (works headed for VNC/manual captcha);
+    falls back to the headless-shell build when headless was requested.
+    """
+    import glob as _glob
+    root = _playwright_browser_root()
+    full = sorted(_glob.glob(os.path.join(root, "chromium-*", "chrome-linux", "chrome")) +
+                  sorted(_glob.glob(os.path.join(root, "chromium-*", "chrome-linux64", "chrome"))))
+    full = [p for p in full if os.path.isfile(p) and os.access(p, os.X_OK)]
+    if full:
+        return full[-1]
+    if headless:
+        shells = sorted(_glob.glob(os.path.join(root, "chromium_headless_shell-*", "chrome-linux", "headless_shell"))) + \
+            sorted(_glob.glob(os.path.join(root, "chromium_headless_shell-*", "chrome-linux64", "headless_shell")))
+        shells = [p for p in shells if os.path.isfile(p) and os.access(p, os.X_OK)]
+        if shells:
+            return shells[-1]
+    return None
+
+
+def _auto_install_chromium():
+    """One-time `playwright install chromium` (mirror first, default CDN
+    fallback). Returns True if a bundled binary exists afterwards."""
+    global _BROWSER_AUTO_TRIED
+    if os.environ.get("TH_NO_AUTO_BROWSER", "") == "1":
+        return False
+    if _BROWSER_AUTO_TRIED:
+        return bundled_chromium_exe() is not None
+    _BROWSER_AUTO_TRIED = True
+    import subprocess as _sp
+    log("No browser found — downloading own chromium (~115MB, one-time)...", "arr")
+    for env in ({"PLAYWRIGHT_DOWNLOAD_HOST": _PW_MIRROR}, {}):
+        try:
+            e = dict(os.environ)
+            e.update(env)
+            r = _sp.run([sys.executable, "-m", "playwright", "install", "chromium"],
+                        capture_output=True, text=True, timeout=600, env=e)
+            if bundled_chromium_exe() is not None:
+                log("Bundled chromium ready", "ok")
+                return True
+            dlog(f"chromium install attempt failed: {(r.stderr or r.stdout or '')[-200:]}")
+        except Exception as e:
+            dlog(f"chromium auto-install: {e}")
+    return bundled_chromium_exe() is not None
+
+
+def resolve_browser_executable(headless=True):
     """Return an ABSOLUTE browser executable path, or None.
 
-    Playwright does NOT do $PATH lookup for executable_path — a bare
-    "google-chrome" is stat'ed literally (./google-chrome) and always fails
-    with `executable doesn't exist at google-chrome`. Never return relative.
+    Order: explicit env override -> OWN bundled chromium (no host package
+    needed) -> host google-chrome/chromium -> auto-download bundled once.
     Prefers real google-chrome over the snap shim chromium-browser.
     """
     global _BROWSER_RESOLVED
     if _BROWSER_RESOLVED and os.path.isfile(_BROWSER_RESOLVED) and os.access(_BROWSER_RESOLVED, os.X_OK):
-        return _BROWSER_RESOLVED
+        # headless-shell can't do headed/VNC — re-resolve if mode mismatches
+        if headless or "headless_shell" not in _BROWSER_RESOLVED:
+            return _BROWSER_RESOLVED
+        _BROWSER_RESOLVED = None
     # explicit override wins (must still be absolute + executable)
     for env_key in ("CHROME_PATH", "BROWSER_PATH", "PLAYWRIGHT_CHROME_PATH"):
         v = (os.environ.get(env_key) or "").strip()
         if v and os.path.isabs(v) and os.path.isfile(v) and os.access(v, os.X_OK):
             _BROWSER_RESOLVED = v
             return v
-    # $PATH lookup via which (always absolute when found)
+    # 1. our own bundled chromium — independent of host packages
+    b = bundled_chromium_exe(headless=headless)
+    if b:
+        _BROWSER_RESOLVED = b
+        return b
+    # 2. $PATH lookup via which (always absolute when found)
     for name in ("google-chrome", "google-chrome-stable", "chromium-browser", "chromium"):
         w = shutil.which(name)
         if w and os.path.isabs(w) and os.path.isfile(w):
@@ -1634,7 +1717,7 @@ def resolve_browser_executable():
             if os.access(w, os.X_OK):
                 _BROWSER_RESOLVED = w
                 return w
-    # absolute candidates (handles minimal PATH, incl. snap shim last resort)
+    # 3. absolute candidates (handles minimal PATH, incl. snap shim last resort)
     for p in _BROWSER_CANDIDATES:
         if os.path.isfile(p) and os.access(p, os.X_OK):
             # resolve alternatives (e.g. /usr/bin/google-chrome -> .../google-chrome)
@@ -1647,18 +1730,27 @@ def resolve_browser_executable():
                 pass
             _BROWSER_RESOLVED = p
             return p
+    # 4. nothing anywhere — try a one-time bundled download, then re-resolve
+    if _auto_install_chromium():
+        b = bundled_chromium_exe(headless=headless)
+        if b:
+            _BROWSER_RESOLVED = b
+            return b
     return None
 
 
-def preflight_browser(log_it=True):
+def preflight_browser(log_it=True, headless=True):
     """Fail-fast check before any batch: returns path or None (logs reason)."""
-    exe = resolve_browser_executable()
+    exe = resolve_browser_executable(headless=headless)
     if exe:
         return exe
     if log_it:
-        elog("browser preflight failed: no usable chrome/chromium found "
-             "(checked $PATH google-chrome/chromium + /usr/bin/google-chrome, "
-             "/opt/google/chrome/google-chrome, /usr/bin/chromium-browser). "
+        elog("browser preflight failed: no bundled chromium and no host "
+             "chrome/chromium found (checked own ms-playwright cache, $PATH "
+             "google-chrome/chromium, /usr/bin/google-chrome, "
+             "/opt/google/chrome/google-chrome). Tried one-time "
+             "`playwright install chromium` (mirror " + _PW_MIRROR + "). "
+             "Set CHROME_PATH=/abs/path to override. "
              "Refusing to burn proxies/emails.")
     return None
 
@@ -2140,7 +2232,7 @@ def create_account(c, email=None, password=None, _retry=True):
         pw_timeout_ms = 120000
     _ensure_deps("curl_cffi")
     # browser preflight FIRST — never burn proxies/emails on a missing binary
-    browser_exe = preflight_browser(log_it=True)
+    browser_exe = preflight_browser(log_it=True, headless=headless)
     if not browser_exe:
         c["_local_fatal"] = "no usable browser executable"
         return None
@@ -2815,7 +2907,7 @@ def open_verify_link(link):
     import webbrowser
     try:
         if os.environ.get("DISPLAY"):
-            _ovl_exe = resolve_browser_executable() or "google-chrome"
+            _ovl_exe = resolve_browser_executable(headless=False) or "google-chrome"
             subprocess.Popen([_ovl_exe, "--no-sandbox", link],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return
@@ -2874,7 +2966,7 @@ def run_full_flow(c, email=None, password=None, pm=None, provider_hint=None, ski
             return None
     # 1. CREATE (with proxy rotation: fail 3x → rotate proxy → retry same account)
     # Fail fast on deterministic local errors — never burn 30 attempts/proxies.
-    if not preflight_browser(log_it=True):
+    if not preflight_browser(log_it=True, headless=not c.get("vnc_mode", False)):
         c["_local_fatal"] = "no usable browser executable (preflight)"
         log("Aborting: no usable browser — fix chrome install, not proxies", "no")
         return None
@@ -3156,7 +3248,7 @@ def merge_key_record(rec, verified=False, free_ok=False):
 
 def menu_create():
     c = load_cfg()
-    if not preflight_browser(log_it=True):
+    if not preflight_browser(log_it=True, headless=not c.get("vnc_mode", False)):
         log("Create aborted: no usable browser executable", "no")
         raw_input("  " + DI + "Press Enter" + RS)
         return
@@ -3292,7 +3384,7 @@ def menu_batch():
     global _BATCH_INTERRUPT
     clear_stop()
     # browser preflight BEFORE installing handler — abort batch with zero burn
-    if not preflight_browser(log_it=True):
+    if not preflight_browser(log_it=True, headless=not c.get("vnc_mode", False)):
         log("Batch aborted: no usable browser executable", "no")
         raw_input("  " + DI + "Press Enter" + RS)
         return

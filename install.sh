@@ -257,6 +257,14 @@ install_browser_deps() {
             err "Gagal unduh camoufox. Jalankan manual: $PY_RUN -m camoufox fetch"
             log "    Atau jalankan dengan --skip-browser dan unduh nanti"
         }
+        log "==> [5/6] Unduh chromium milik sendiri (~115MB, sekali saja, tidak tergantung paket host)"
+        PLAYWRIGHT_DOWNLOAD_HOST="${PLAYWRIGHT_DOWNLOAD_HOST:-https://npmmirror.com/mirrors/playwright}" \
+            $PY_RUN -m playwright install chromium || \
+        $PY_RUN -m playwright install chromium || {
+            err "Gagal unduh chromium. Jalankan manual:"
+            err "    PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright $PY_RUN -m playwright install chromium"
+            log "    TUI tetap jalan via chrome host bila ada, atau unduh otomatis saat pertama dipakai"
+        }
     fi
 }
 
@@ -269,13 +277,19 @@ create_launchers() {
         PYTHON_PATH="$PY"
     fi
     
-    cat > th <<EOF
+    cat > tokenharbor <<EOF
 #!/usr/bin/env bash
 cd "\$(dirname "\$0")"
-exec "$PYTHON_PATH" "\$(dirname "\$0")/th-create.py" "\$@"
+exec "$PYTHON_PATH" "\$(dirname "\$0")/tokenharbor.py" "\$@"
 EOF
     
-    chmod +x th th-create.py th_lib.py th-import.py th-verify.py th-freeplan.py 2>/dev/null || true
+    cat > grok <<EOF
+#!/usr/bin/env bash
+cd "\$(dirname "\$0")"
+exec "$PYTHON_PATH" "\$(dirname "\$0")/grok.py" "\$@"
+EOF
+    
+    chmod +x tokenharbor grok tokenharbor.py grok.py import_tokenharbor.py verify_tokenharbor_emails.py 2>/dev/null || true
 }
 
 # ---- 7. Verifikasi -------------------------------------------------------
@@ -288,12 +302,12 @@ verify_install() {
         log "  ⚠ Verifikasi import gagal (lihat error di atas)"
     fi
     
-    if "$PY_RUN" th-create.py --help >/dev/null 2>&1; then
-        log "  ✓ th-create.py siap dipakai"
+    if "$PY_RUN" tokenharbor.py --help >/dev/null 2>&1; then
+        log "  ✓ tokenharbor.py siap dipakai"
     fi
     
-    if "$PY_RUN" th-import.py --help >/dev/null 2>&1; then
-        log "  ✓ th-import.py siap dipakai"
+    if "$PY_RUN" import_tokenharbor.py --help >/dev/null 2>&1; then
+        log "  ✓ import_tokenharbor.py siap dipakai"
     fi
 }
 
@@ -310,14 +324,15 @@ log "======================================================================"
 log " ✅ Instalasi selesai!"
 log ""
 log " Cara pakai:"
-log "   ./th --count 1 --label router-prod"
-log "   ./th --count 5 --fast              # mode cepat"
-log "   ./th --count 10 --threads 3        # mode parallel (3x cepat!)"
-log "   python3 th-import.py              # import key ke 9router"
-log "   python3 th-verify.py       # verifikasi email"
+log "   ./tokenharbor --count 1 --label router-prod"
+log "   ./tokenharbor --count 5 --fast              # mode cepat"
+log "   ./tokenharbor --count 10 --threads 3        # mode parallel (3x cepat!)"
+log "   python3 import_tokenharbor.py              # import key ke 9router"
+log "   python3 verify_tokenharbor_emails.py       # verifikasi email"
 log ""
 log " File hasil:"
 log "   tokenharbor_keys.txt      - API keys Token Harbor"
+log "   accounts.txt              - Akun xAI (dari grok.py)"
 log ""
 log " ⚡ Speed modes:"
 log "   --fast    : jeda 30s antar akun"
