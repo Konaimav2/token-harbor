@@ -577,7 +577,17 @@ def _vconfirm(pg, expectation):
 
 def flamingo_login(pg, email, password):
     """Login via the auth page tabs. Returns True when dashboard reached."""
-    pg.goto(f"{AUTH_BASE}/register", wait_until="domcontentloaded", timeout=60000)
+    ok = False
+    for i in range(3):
+        try:
+            pg.goto(f"{AUTH_BASE}/register", wait_until="domcontentloaded", timeout=60000)
+            ok = True
+            break
+        except Exception as e:
+            log(f"login nav {i+1}/3: {str(e)[:50]}", "warn")
+            pg.wait_for_timeout(5000)
+    if not ok:
+        return False
     pg.wait_for_timeout(5000)
     try:
         pg.wait_for_function("() => typeof toggleTab === 'function'", timeout=20000)
@@ -643,6 +653,226 @@ def redeem_50mb(pg):
     except Exception as e:
         log(f"redeem err: {str(e)[:80]}", "warn")
         return False
+
+
+GEN_COUNTRIES = ["Indonesia", "Malaysia", "Singapore", "India"]
+
+
+def _vision_locate_click(pg, target, timeout=120):
+    """Last-resort click by vision coordinates. Returns True on click."""
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(BASE / "tools"))
+        import vision_solve as _vs
+        x, y = _vs.locate_on_page(pg, target, timeout=timeout)
+        pg.mouse.click(x, y)
+        log(f"vision-clicked '{target}' at ({x},{y})")
+        return True
+    except Exception as e:
+        log(f"vision-click '{target}' failed: {str(e)[:80]}", "warn")
+        return False
+
+
+def claim_50mb(pg):
+    """Affiliate page: Claim/Redeem the free 50MB (button text varies). Vision-gated."""
+    pg.goto(f"{DASH_BASE}/affiliate", wait_until="domcontentloaded", timeout=60000)
+    pg.wait_for_timeout(5000)
+    for txt in ("Claim", "Redeem"):
+        try:
+            btns = pg.locator(f"button:has-text('{txt}')")
+            if btns.count():
+                btns.first.click(timeout=10000)
+                pg.wait_for_timeout(4000)
+                break
+        except Exception:
+            pass
+    # confirm modal (Confirm/Yes/Claim now) if one appeared
+    for txt in ("Confirm", "Yes", "Claim now", "Redeem now", "Confirm redeem"):
+        try:
+            loc = pg.locator(f"button:has-text('{txt}')").first
+            if loc.count() and loc.is_visible(timeout=2000):
+                loc.click(timeout=8000)
+                pg.wait_for_timeout(4000)
+                break
+        except Exception:
+            pass
+    return _vconfirm(pg, "affiliate page showing the free 50MB claimed/redeemed or a success confirmation")
+
+
+def _select_option_by_names(pg, scope, names):
+    """Pick first matching visible option text in a <select>. Returns (value, text)."""
+    sels = scope.locator("select")
+    for i in range(sels.count()):
+        try:
+            opts = sels.nth(i).locator("option")
+            texts = [opts.nth(j).inner_text(timeout=1500).strip() for j in range(opts.count())]
+            for want in names:
+                for t in texts:
+                    if want.lower() in t.lower() or t.lower() in want.lower():
+                        val = opts.filter(has_text=t).first.get_attribute("value")
+                        sels.nth(i).select_option(value=val)
+                        return val, t
+        except Exception:
+            pass
+    return None, ""
+
+
+def configure_generator(pg, qty=5, sticky_min=2, sticky_max=5, countries=None):
+    """Drive the Residential Proxy Generator form. Returns dict used for API call.
+
+    Plan=Standard, Sticky + duration (Rotating->Sticky fallback), Country from
+    list w/ random State/City, Qty. Vision-gated at the end.
+    """
+    countries = countries or GEN_COUNTRIES
+    pg.goto(f"{DASH_BASE}/?tab=residential", wait_until="domcontentloaded", timeout=60000)
+    pg.wait_for_timeout(5000)
+    # generator may live on the plan product page — open Standard card if needed
+    try:
+        body = (pg.inner_text("body", timeout=8000) or "").lower()
+    except Exception:
+        body = ""
+    if "residential proxy generator" not in body:
+        for sel in ["text=Standard Residential", "text=Standard Resident"]:
+            try:
+                loc = pg.locator(sel).first
+                if loc.count():
+                    loc.click(timeout=10000)
+                    pg.wait_for_timeout(6000)
+                    break
+            except Exception:
+                pass
+    try:
+        body = (pg.inner_text("body", timeout=8000) or "").lower()
+    except Exception:
+        body = ""
+    if "residential proxy generator" not in body:
+        # vision fallback: find + click whatever opens the generator
+        _vision_locate_click(pg, "the Standard Residential plan card or button that opens proxy generation")
+        pg.wait_for_timeout(5000)
+    _vconfirm(pg, "Residential Proxy Generator form visible with plan, proxy type, country and quantity controls")
+    gen = pg.locator("text=/Residential Proxy Generator/i").first
+    scope = pg.locator("body")
+    try:
+        # scope to the generator container when identifiable
+        cont = pg.locator("div:has-text('Residential Proxy Generator')").last
+        if cont.count():
+            scope = cont
+    except Exception:
+        pass
+    # 1. Plan = Standard
+    try:
+        _select_option_by_names(scope, ["Standard Residential", "Standard Resident", "Standard"])
+    except Exception:
+        pass
+    # 2. Proxy type Sticky (+ duration); fallback Rotating->Sticky
+    sticky_val = random.randint(sticky_min, sticky_max)
+    try:
+        for mode in ("Sticky",):
+            for sel in (f"input[value='{mode}' i]", f"button:has-text('{mode}')",
+                        f"label:has-text('{mode}')"):
+                try:
+                    loc = scope.locator(sel).first
+                    if loc.count() and loc.is_visible(timeout=2000):
+                        loc.click(timeout=8000)
+                        pg.wait_for_timeout(2000)
+                        break
+                except Exception:
+                    pass
+        dur = scope.locator("input[type='number']").first
+        dur_set = False
+        if dur.count():
+            try:
+                dur.fill(str(sticky_val), timeout=8000)
+                dur_set = True
+            except Exception:
+                pass
+        if not dur_set:
+            # toggle Rotating -> back to Sticky, duration input often appears then
+            for mode in ("Rotating", "Sticky"):
+                try:
+                    loc = scope.locator(f"label:has-text('{mode}'), button:has-text('{mode}')").first
+                    if loc.count() and loc.is_visible(timeout=2000):
+                        loc.click(timeout=8000)
+                        pg.wait_for_timeout(2000)
+                except Exception:
+                    pass
+            try:
+                dur = scope.locator("input[type='number']").first
+                if dur.count():
+                    dur.fill(str(sticky_val), timeout=8000)
+            except Exception:
+                pass
+    except Exception as e:
+        log(f"sticky config: {str(e)[:60]}", "warn")
+    # 3. Country (+ value id) with random State/City
+    country_val, country_name, state_val, city_val = "_country-id", "any", "random", "random"
+    try:
+        sels = scope.locator("select")
+        geo = []
+        for i in range(sels.count()):
+            try:
+                opts = sels.nth(i).locator("option")
+                texts = [opts.nth(j).inner_text(timeout=1500).strip() for j in range(opts.count())]
+                geo.append((i, texts))
+            except Exception:
+                pass
+        # country select = the one containing a wanted country
+        for i, texts in geo:
+            for want in countries:
+                hit = next((t for t in texts if want.lower() in t.lower()), "")
+                if hit:
+                    val = scope.locator("select").nth(i).locator("option", has_text=hit).first.get_attribute("value")
+                    scope.locator("select").nth(i).select_option(value=val)
+                    pg.wait_for_timeout(3000)  # state/city options reload
+                    country_val, country_name = val, hit
+                    break
+            if country_val != "_country-id":
+                break
+        if country_val == "_country-id":
+            # keep placeholder-country default, still randomize the rest below
+            log("wanted countries not listed — keeping default country")
+        # state/city = random non-placeholder option of the remaining selects
+        picked = 0
+        for i, _ in geo:
+            try:
+                sel = scope.locator("select").nth(i)
+                opts = sel.locator("option")
+                vals = []
+                for j in range(opts.count()):
+                    t = opts.nth(j).inner_text(timeout=1500).strip()
+                    v = opts.nth(j).get_attribute("value")
+                    if t and v and "select" not in t.lower() and "choose" not in t.lower() and v != country_val:
+                        vals.append((v, t))
+                if vals and picked < 2:
+                    v, t = random.choice(vals)
+                    # skip the country select itself
+                    cur = sel.input_value(timeout=2000)
+                    if cur == country_val:
+                        continue
+                    sel.select_option(value=v)
+                    if picked == 0:
+                        state_val = v
+                    else:
+                        city_val = v
+                    picked += 1
+                    pg.wait_for_timeout(1500)
+            except Exception:
+                pass
+    except Exception as e:
+        log(f"geo config: {str(e)[:60]}", "warn")
+    # 4. Qty
+    try:
+        qty_in = scope.locator("input[name*='qty' i], input[name*='quantity' i], input[name*='amount' i]").first
+        if not qty_in.count():
+            # numeric input nearest the Generate button
+            qty_in = scope.locator("input[type='number']").last
+        if qty_in.count():
+            qty_in.fill(str(qty), timeout=8000)
+    except Exception as e:
+        log(f"qty config: {str(e)[:60]}", "warn")
+    ok = _vconfirm(pg, f"generator form set: Standard plan, Sticky {sticky_val}min, {country_name}, qty {qty}")
+    return {"country": country_val, "state": state_val, "city": city_val,
+            "sticky": sticky_val, "confirmed": ok}
 
 
 def generate_proxies_api(pg, plan=2, qty=5, sticky=10, country="_country-id"):
@@ -719,15 +949,22 @@ def gen_account(tui, email, password, proxy_parsed, qty, sticky, country, plan, 
                 return 0
             pts, active = affiliate_points(pg)
             log(f"{email}: points={pts} active_plan={active}")
-            if not active and pts >= 1:
-                log(f"{email}: redeeming 50MB Standard...")
-                redeem_50mb(pg)
+            if not active:
+                log(f"{email}: claiming free 50MB...")
+                claim_50mb(pg)
+                if pts < 1:
+                    # legacy redeem path as fallback
+                    redeem_50mb(pg)
                 pts, active = affiliate_points(pg)
-                log(f"{email}: after redeem points={pts} active_plan={active}")
+                log(f"{email}: after claim points={pts} active_plan={active}")
             if not active:
                 log(f"{email}: no active plan (points={pts}) — cannot generate yet", "warn")
                 return 0
-            got = generate_proxies_api(pg, plan=plan, qty=qty, sticky=sticky, country=country)
+            # configure the visible generator form (discovers country/state/city ids)
+            cfg = configure_generator(pg, qty=qty, sticky_min=2,
+                                      sticky_max=max(2, min(5, sticky)), countries=GEN_COUNTRIES)
+            got = generate_proxies_api(pg, plan=plan, qty=qty, sticky=cfg.get("sticky", sticky),
+                                       country=cfg.get("country", country))
             log(f"{email}: generated {len(got)} proxies")
             if not got:
                 return 0
@@ -772,6 +1009,39 @@ def gen_main(args, tui):
         return 1
     print(f"  TH-FLAMINGO-GEN: {len(accts)} accounts x {args.gen_qty} proxies "
           f"(sticky {args.sticky}min, plan {args.gen_plan})")
+    if args.watch > 0:
+        # watch mode: repeat rounds until every account yielded proxies
+        pending = list(accts)
+        rnd = 0
+        grand = 0
+        while pending and (args.rounds <= 0 or rnd < args.rounds):
+            rnd += 1
+            log(f"watch round {rnd}: {len(pending)} pending, checking points...")
+            still = []
+            for (email, pw) in pending:
+                proxy = None if args.no_proxy else pool.pick()
+                try:
+                    n = gen_account(tui, email, pw, proxy, args.gen_qty, args.sticky,
+                                    args.country, args.gen_plan, args.vnc)
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
+                    log(f"{email} gen err: {str(e)[:80]}", "warn")
+                    n = 0
+                if n > 0:
+                    grand += n
+                    log(f"{email}: +{n} proxies DONE")
+                else:
+                    still.append((email, pw))
+            pending = still
+            if pending:
+                log(f"round {rnd}: {len(pending)} still waiting on points — sleeping {args.watch}min")
+                try:
+                    time.sleep(args.watch * 60)
+                except KeyboardInterrupt:
+                    raise
+        print(f"\n  WATCH DONE: +{grand} proxies -> proxy.txt, {len(pending)} still pending")
+        return 0
     total = 0
     for i, (email, pw) in enumerate(accts, 1):
         proxy = None if args.no_proxy else pool.pick()
@@ -812,9 +1082,12 @@ def main():
     ap.add_argument("--gen-accounts", default="",
                     help="comma-separated farm emails for gen mode (default: all verified/registered)")
     ap.add_argument("--gen-qty", type=int, default=5, help="proxies per account (default 5)")
-    ap.add_argument("--sticky", type=int, default=10, help="sticky minutes 5-30 (default 10)")
+    ap.add_argument("--sticky", type=int, default=5, help="sticky minutes 2-5 (default 5)")
     ap.add_argument("--country", default="_country-id", help="country id or _country-id for any")
     ap.add_argument("--gen-plan", type=int, default=2, help="proxy_plan id (default 2=Standard)")
+    ap.add_argument("--watch", type=int, default=0,
+                    help="gen-only: re-check points every N minutes until all accounts generated (0=off)")
+    ap.add_argument("--rounds", type=int, default=0, help="max watch rounds (0=unlimited)")
     ap.add_argument("--vnc", action="store_true")
     args = ap.parse_args()
 
