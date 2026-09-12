@@ -35,6 +35,7 @@ if _venv_py.exists():
         os.execv(_venv_py, [_venv_py, os.path.abspath(__file__)] + sys.argv[1:])
 
 AUTH_BASE = "https://auth.flamingoproxies.com"
+DASH_BASE = "https://dashboard.flamingoproxies.com"
 V3_SITEKEY = "6LeQUB8sAAAAAF1dsVInisFV-UO6hZQj6cowDm48"  # recaptcha v3 (invisible)
 DEFAULT_REF = "FLGCEJ36R52S"
 
@@ -114,7 +115,28 @@ def load_used():
     return used
 
 
+def ref_code(raw):
+    """Accept a bare code or a full affiliate URL -> code."""
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    m = re.search(r"[?&]ref=([A-Za-z0-9_-]+)", raw)
+    return m.group(1) if m else raw
+
+
+def unmark_used(email):
+    email = email.lower()
+    if USED_FILE.exists():
+        try:
+            lines = [l for l in USED_FILE.read_text().splitlines()
+                     if l.strip().lower() != email]
+            USED_FILE.write_text("\n".join(lines) + ("\n" if lines else ""))
+        except Exception:
+            pass
+
+
 def mark_used(email):
+    """Log an email as used/attempted so it's skipped next run (deduped)."""
     email = email.lower()
     if USED_FILE.exists():
         try:
@@ -289,16 +311,25 @@ def create_one(tui, email, name, password, proxy_parsed, ref, vnc_mode=False,
                 except Exception as e:
                     log(f"cookie inject failed: {str(e)[:60]}", "warn")
             pg = ctx.new_page()
-            reg_url = f"{AUTH_BASE}/register?ref={ref}" if ref else f"{AUTH_BASE}/register"
-            pg.goto(reg_url, wait_until="domcontentloaded", timeout=45000)
-            time.sleep(3)
-            # confirm referral attribution stuck (cookie / storage)
-            try:
-                cks = [c["name"] for c in ctx.cookies()]
-                ref_cks = [c for c in cks if "ref" in c.lower() or "aff" in c.lower()]
-                log(f"ref cookies: {ref_cks or cks[:6]}")
-            except Exception:
-                pass
+            # ATTRIBUTION FIRST: the affiliate link sets the affiliate_ref cookie
+            # (Domain=.flamingoproxies.com, shared with auth). ?ref= on the
+            # register page does NOTHING — registering without this cookie earns
+            # zero referral credit. Abort BEFORE burning the email if missing.
+            code = ref_code(ref)
+            if code:
+                try:
+                    pg.goto(f"{DASH_BASE}/affiliate-link?ref={code}",
+                            wait_until="domcontentloaded", timeout=45000)
+                    time.sleep(3)
+                except Exception as e:
+                    log(f"affiliate link visit failed: {str(e)[:60]}", "warn")
+                attached = any(c["name"] == "affiliate_ref" and code in (c["value"] or "")
+                               for c in ctx.cookies())
+                if not attached:
+                    log("NO affiliate_ref cookie — refusing to register unattributed", "warn")
+                    return "noattr"
+                log(f"referral attached: {code}", "ok")
+            reg_url = f"{AUTH_BASE}/register"
             # warm-up: v3 scores session behavior — dwell on the main site with
             # human-like mouse/scroll before touching the register form.
             try:
@@ -412,6 +443,11 @@ def create_one(tui, email, name, password, proxy_parsed, ref, vnc_mode=False,
                 elif outcome == "verify-tab":
                     pass
                 else:
+                    if "recaptcha" in msg:
+                        # v3 score reject: NO account was created, the email is
+                        # still free on Flamingo's side — keep it retryable.
+                        log("v3 score reject — email kept fresh for a later run", "warn")
+                        return "score"
                     if any(p in msg for p in DEAD_PHRASES):
                         return "exists"
                     if any(p in msg for p in ROTATE_PHRASES):
@@ -478,7 +514,7 @@ def main():
     ap.add_argument("--captcha-key", default="")
     ap.add_argument("--captcha-provider", default="2captcha")
     ap.add_argument("--gmail-cookie", default="",
-                    help="gmail address whose google session cookies boost the v3 score")
+                    help="gmail address for google session cookies (v3 boost), or 'auto' to rotate")
     ap.add_argument("--no-proxy", action="store_true",
                     help="direct connection (exposes host IP — use for score tests)")
     ap.add_argument("--vnc", action="store_true")
@@ -502,7 +538,13 @@ def main():
     used = load_used()
     doms = _cloud_domains(tui)
     gcookies = []
-    if args.gmail_cookie:
+    cookie_pool = []
+    if args.gmail_cookie.lower() == "auto":
+        cdir = Path("/root/projects/gmail-inbox/cookies")
+        if cdir.exists():
+            cookie_pool = sorted(cdir.glob("*_gmail_com.json"))
+            log(f"cookie rotation pool: {len(cookie_pool)} gmail sessions")
+    elif args.gmail_cookie:
         try:
             cf = (Path("/root/projects/gmail-inbox/cookies")
                   / (args.gmail_cookie.split("@")[0].replace(".", "_") + "_gmail_com.json"))
@@ -533,16 +575,41 @@ def main():
             tui.create_cloudmail_inbox(email)
         except Exception:
             pass
+        if cookie_pool:
+            # rotate a fresh google session per account (spreads v3 risk)
+            cf = cookie_pool[(i - 1) % len(cookie_pool)]
+            try:
+                raw = json.loads(cf.read_text())
+                gcookies = [{"name": c["name"], "value": c["value"], "domain": c["domain"],
+                             "path": c.get("path", "/"), "secure": bool(c.get("secure", True)),
+                             "httpOnly": bool(c.get("httpOnly", False)),
+                             "sameSite": c.get("sameSite", "Lax")}
+                            for c in raw if "google.com" in c.get("domain", "")]
+                log(f"rotated cookies: {cf.stem} ({len(gcookies)})")
+            except Exception as e:
+                log(f"cookie load {cf.name} failed: {str(e)[:50]}", "warn")
+                gcookies = []
         proxy = None if args.no_proxy else pool.pick()
         if not proxy and not args.no_proxy:
             log("proxy pool exhausted (all capped/failed) — stopping", "warn")
             break
         log(f"[{i}/{args.count}] Registering {email} via "
             + ("DIRECT" if args.no_proxy else f"{proxy[1]}:{proxy[2]}") + " ...")
-        mark_used(email)
         st = create_one(tui, email, name, password, proxy, args.ref, vnc_mode=args.vnc,
                         captcha_key=args.captcha_key, captcha_provider=args.captcha_provider,
                         gmail_cookies=gcookies or None)
+        if st == "noattr":
+            unmark_used(email)
+            log(f"[{i}/{args.count}] {email} skipped (no attribution — email NOT burned)", "warn")
+            fail += 1
+            continue
+        if st == "score":
+            unmark_used(email)
+            save_account(email, password, name, "score-retry")
+            log(f"[{i}/{args.count}] {email} v3-rejected, kept fresh for retry", "warn")
+            fail += 1
+            continue
+        mark_used(email)
         save_account(email, password, name, st)
         if st == "verified":
             ok += 1
