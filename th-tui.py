@@ -1957,6 +1957,8 @@ def _next_proxy(c, last=None):
         if not res:
             continue  # dead proxy, try next
         ip = res[1] if len(res) > 1 else (p[1] if len(p) > 1 else "?")
+        if not ip:
+            continue  # check returned no exit IP — treat as dead, try next
         if ip in used_ips:
             continue  # skip previously failed proxy
         c["_last_proxy_ip"] = ip  # track for failure reporting
@@ -2490,6 +2492,24 @@ def create_account(c, email=None, password=None, _retry=True):
                     log(f"Backend network rate-limit ({', '.join(_blocked_hit)}) — cooldown 1h + rotate", "warn")
                 else:
                     log(f"Backend blocked signup ({', '.join(_blocked_hit)}) — rotating proxy | page={body[:300]}", "warn")
+                # email-specific rejects never succeed on ANY proxy — stop email now
+                if any(s in body for s in ["invalid email", "disposable", "email domain not allowed", "blacklist"]):
+                    log(f"{email}: backend rejects this address itself — moving on (not marking used)", "warn")
+                    b.close()
+                    return None
+                # hard backend rejects across DISTINCT IPs = range/request-level ban:
+                # rotating more proxies just burns time — trip the batch breaker.
+                if any(s in body for s in ["our team has been alerted", "support team has been informed",
+                                           "couldn't create your account", "can't create your account"]):
+                    _hip = c.get("_last_proxy_ip") or "?"
+                    _seen = c.setdefault("_hard_reject_ips", [])
+                    if _hip not in _seen:
+                        _seen.append(_hip)
+                    if len(_seen) >= 3:
+                        c["_batch_hard_reject"] = f"backend hard-rejecting signups on {len(_seen)} distinct IPs"
+                        log(f"Aborting {email}: backend hard-rejects across {len(_seen)} IPs ({', '.join(_seen)}) — pool/range flagged, rotation is pointless", "no")
+                        b.close()
+                        return None
                 b.close()
                 return None  # let run_full_flow retry with different proxy
             # stall/retry path — also reached after the suspect-registered warn above
@@ -3039,6 +3059,8 @@ def run_full_flow(c, email=None, password=None, pm=None, provider_hint=None, ski
             log(f"Aborting {email}: proxy pool exhausted — rotating is pointless, add fresh proxies (menu 6 → scrape)", "no")
             c["_batch_pool_dead"] = True
             return None
+        if c.get("_batch_hard_reject"):
+            return None
         if c.get("_local_fatal"):
             msg = c.pop("_local_fatal", "local fatal")
             log(f"Aborting {email}: {msg} (not a proxy failure — fix locally, proxies untouched)", "no")
@@ -3474,6 +3496,11 @@ def menu_batch():
             # pool exhausted: further accounts would fail identically — stop
             if c.pop("_batch_pool_dead", None):
                 log("Batch aborted: proxy pool exhausted (menu 6 → scrape/check for fresh proxies)", "no")
+                break
+            # backend hard-rejecting across IPs: further accounts burn time — stop
+            _hbr = c.pop("_batch_hard_reject", None)
+            if _hbr:
+                log(f"Batch aborted: {_hbr} (fresh provider/range or cooldown needed)", "no")
                 break
             if r:
                 ok.append(r)
