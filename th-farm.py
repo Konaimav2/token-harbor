@@ -198,10 +198,12 @@ def main():
                     skip_inbox = (rmode == "reuse_unused")
             m.log(f"[{idx}/{count}] {('Re-verifying' if rmode=='reverify_pending' else 'Starting')} {email} ({rmode or 'fresh'})", "arr")
             success = run_one(m, c, idx + 1, count, email=email, password=password, skip_inbox=skip_inbox, rmode=rmode)
-            # local fatal: stop whole farm, don't burn remaining queue
+            # local fatal / pool dead: stop whole farm, don't burn remaining queue
             try:
-                if c.pop("_batch_local_fatal", None):
-                    m.log("Farm aborting: local browser failure", "no")
+                _fatal = c.pop("_batch_local_fatal", None)
+                _pool = c.pop("_batch_pool_dead", None)
+                if _fatal or _pool:
+                    m.log("Farm aborting: " + ("proxy pool exhausted" if _pool else "local browser failure"), "no")
                     with _lock:
                         queue.clear()
                     stop.set()

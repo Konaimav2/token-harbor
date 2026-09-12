@@ -1921,7 +1921,12 @@ def _next_proxy(c, last=None):
         return None
     used_ips = set(c.get("_used_proxy_ips", []))
     if order == "least":
-        p, ip = pm.smart_pick_proxy(proxies, used_ips=used_ips)
+        # skip cooldown proxies here too (smart_pick has no cooldown check)
+        fresh = [p for p in proxies if not _is_ratelimited(_proxy_id(p))]
+        if not fresh:
+            dlog("all proxies on rate-limit cooldown for least-order pick")
+            return None
+        p, ip = pm.smart_pick_proxy(fresh, used_ips=used_ips)
         if p:
             pass  # caller adds to _used_proxy_ips on failure
             log(f"Using proxy: {p[1] if len(p)>1 else '?'}:{p[2] if len(p)>2 else '?'} (IP: {ip}, order=least)", "info")
@@ -2256,10 +2261,11 @@ def create_account(c, email=None, password=None, _retry=True):
     if not browser_exe:
         c["_local_fatal"] = "no usable browser executable"
         return None
-    # proxy handling
+    # proxy handling — rotate on flag; NEVER run proxyless when proxy required
     pm = _load_proxy_mod()
     pcfg = c.get("proxy", {})
     proxy_parsed = None
+    proxy_required = bool(pcfg.get("enabled") and pm and pcfg.get("mode") in ("list", "combo", "vpngate"))
     if pcfg.get("enabled") and pm:
         if pcfg.get("mode") in ("list", "combo"):
             proxy_parsed = _next_proxy(c)
@@ -2269,6 +2275,12 @@ def create_account(c, email=None, password=None, _retry=True):
             proxy_parsed = pm.vpngate_proxy()
             if proxy_parsed:
                 dlog(f"Using VPNGate residential: {proxy_parsed[1]} for {email}")
+    if proxy_required and not proxy_parsed:
+        # pool exhausted (all dead / failed / on rate-limit cooldown) — running
+        # direct would leak the real IP and burn the email for nothing.
+        c["_pool_dead"] = True
+        elog(f"proxy pool exhausted for {email} (all flagged/dead/cooldown) — refusing proxyless run. Add proxies: menu 6 → scrape/check")
+        return None
     b = None
     ctx = None
     pg = None
@@ -3005,6 +3017,10 @@ def run_full_flow(c, email=None, password=None, pm=None, provider_hint=None, ski
         log("Aborting: no usable browser — fix chrome install, not proxies", "no")
         return None
     c.pop("_local_fatal", None)
+    if c.get("_pool_dead"):
+        log(f"Skipping {email}: proxy pool exhausted (add proxies via menu 6)", "no")
+        c["_batch_pool_dead"] = True
+        return None
     log(f"Registering {email}...", "arr")
     r = None
     max_attempts = 30  # up to 10 proxy rotations × 3 tries each — NEVER give up on the account
@@ -3019,6 +3035,10 @@ def run_full_flow(c, email=None, password=None, pm=None, provider_hint=None, ski
         if r:
             dlog(f"Account created for {email}")
             break
+        if c.pop("_pool_dead", None):
+            log(f"Aborting {email}: proxy pool exhausted — rotating is pointless, add fresh proxies (menu 6 → scrape)", "no")
+            c["_batch_pool_dead"] = True
+            return None
         if c.get("_local_fatal"):
             msg = c.pop("_local_fatal", "local fatal")
             log(f"Aborting {email}: {msg} (not a proxy failure — fix locally, proxies untouched)", "no")
@@ -3450,6 +3470,10 @@ def menu_batch():
             # deterministic local failure: stop whole batch, not next account
             if c.pop("_batch_local_fatal", None):
                 log("Batch aborted: local browser failure (proxies/emails untouched)", "no")
+                break
+            # pool exhausted: further accounts would fail identically — stop
+            if c.pop("_batch_pool_dead", None):
+                log("Batch aborted: proxy pool exhausted (menu 6 → scrape/check for fresh proxies)", "no")
                 break
             if r:
                 ok.append(r)
