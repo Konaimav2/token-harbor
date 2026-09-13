@@ -618,8 +618,9 @@ def flamingo_challenge_loop(pg, gmail, max_s=300):
                     continue
             except Exception:
                 pass
-        # oauth consent
-        if "consent" in url or re.search(r"ingin mengakses|wants to access", T, re.I):
+        # oauth consent (signin/oauth/id consent variants included)
+        if "consent" in url or "oauth" in url or re.search(
+                r"ingin mengakses|wants to access|mengizinkan|login ke ", T, re.I):
             if _oauth_click_text(pg, "Izinkan") or _oauth_click_text(pg, "Allow") \
                     or _oauth_click_text(pg, "Continue") or _oauth_click_text(pg, "Lanjutkan"):
                 log("consent allowed")
