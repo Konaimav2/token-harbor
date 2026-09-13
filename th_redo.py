@@ -495,18 +495,10 @@ def process_account(ctx, pg_mail, pg_th, email):
                 print("  password set: skipped (no sb token in localStorage)")
         except Exception as e:
             print(f"  password set err: {str(e)[:100]}")
-    # 6. save keys.txt
+    # 6. save to keystore (JSON source of truth; legacy txt mirror auto-updated)
     if api_key:
-        kf = BASE / "data" / "keys.txt"
-        lines = kf.read_text().splitlines() if kf.exists() else []
-        out, found = [], False
-        for l in lines:
-            if l.lower().startswith(email.lower() + "|"):
-                parts = l.split("|"); parts[2] = api_key
-                out.append("|".join(parts)); found = True
-            else: out.append(l)
-        if not found: out.append(f"{email}|{PW}|{api_key}")
-        kf.write_text("\n".join(out) + "\n")
+        import keystore as _ksmod
+        _ksmod.store().upsert(email, password=PW, api_key=api_key)
     return api_key
 
 def test_key(api_key):

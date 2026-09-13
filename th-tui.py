@@ -2766,31 +2766,27 @@ def save_key(data):
 
 def save_unused_email(email, password="test123"):
     """Store an email that was created (inbox ready) but no TH account yet.
-    Marks it as 'unused' in keys.txt so it can be reused next batch instead of wasted.
-    Dedupes by email — if already present, updates password only (preserves existing status/key)."""
+    Marks it as 'unused' so it can be reused next batch instead of wasted.
+    Dedupes by email — preserves existing progress, fills empty password."""
     email = email.lower()
-    line = f"{email}|{password}||unused"
-    lines = []
-    if KEYS_FILE.exists():
-        lines = [l.rstrip("\n") for l in KEYS_FILE.read_text().splitlines() if l.strip()]
-    kept = []
-    seen = False
-    for l in lines:
-        parts = l.split("|")
-        if parts and parts[0].lower() == email:
-            # if existing is pending/verified/ok, keep its progress; just update password if empty
-            if len(parts) >= 2 and not parts[1]:
-                parts[1] = password
-                kept.append("|".join(parts))
-            else:
-                kept.append(l)
-            seen = True
-        else:
-            kept.append(l)
-    if not seen:
-        kept.append(line)
     try:
-        KEYS_FILE.write_text("\n".join(kept) + "\n")
+        ks = _keystore()
+        with ks:
+            recs = ks.load()
+            for r in recs:
+                if r.get("email", "").lower() == email:
+                    if not r.get("password"):
+                        r["password"] = password
+                        import time as _tt
+                        r["updated_at"] = int(_tt.time())
+                        ks.save(recs)
+                    return True
+            import time as _tt2
+            recs.append({"email": email, "password": password, "api_key": "",
+                         "status": "unused", "imported": False, "imported_at": 0,
+                         "connection_id": "", "fingerprint": "",
+                         "updated_at": int(_tt2.time())})
+            ks.save(recs)
         dlog(f"Unused email saved (reusable next batch): {email}")
         return True
     except Exception as e:
@@ -2829,28 +2825,54 @@ def pick_next_email(c):
     return None, None, "fresh"
 
 
+def _keystore():
+    """Project JSON keystore (source of truth). Imports lazily."""
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location("keystore", str(BASE / "keystore.py"))
+    m = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m.store()
+
+
 def load_keys():
-    if not KEYS_FILE.exists():
-        return []
-    keys = []
+    """Records as [{email, password, api_key, status}] from the JSON store."""
     try:
-        for l in open(KEYS_FILE):
-            p = l.strip().split("|")
-            if len(p) >= 3 and "@" in p[0]:
-                keys.append({"email": p[0], "password": p[1], "api_key": p[2],
-                             "status": p[3] if len(p) > 3 else "pending"})
+        recs = _keystore().load()
+        return [{"email": r.get("email", ""), "password": r.get("password", ""),
+                 "api_key": r.get("api_key", ""), "status": r.get("status", "pending")}
+                for r in recs]
     except Exception as e:
         elog(f"load keys: {e}")
-    return keys
+        return []
 
 
 def _save_keys(keys):
-    """Persist keys list back to KEYS_FILE (email|password|api_key|status)."""
+    """Persist keys list to the JSON store (keeps legacy mirror in sync)."""
     try:
-        KEYS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(KEYS_FILE, "w") as f:
+        ks = _keystore()
+        with ks:
+            recs = ks.load()
+            by_email = {r.get("email", "").lower(): r for r in recs}
             for rec in keys:
-                f.write(f"{rec['email']}|{rec.get('password','')}|{rec.get('api_key','')}|{rec.get('status','pending')}\n")
+                em = str(rec.get("email", "")).lower()
+                if not em:
+                    continue
+                r = by_email.get(em)
+                if r is None:
+                    r = {"email": em, "password": "", "api_key": "",
+                         "status": "pending", "imported": False, "imported_at": 0,
+                         "connection_id": "", "fingerprint": "", "updated_at": 0}
+                    recs.append(r)
+                    by_email[em] = r
+                for k in ("password", "api_key", "status"):
+                    if k in rec:
+                        r[k] = rec[k]
+                import hashlib as _hl
+                r["fingerprint"] = _hl.md5(r.get("api_key", "").encode()).hexdigest() \
+                    if r.get("api_key") else r.get("fingerprint", "")
+                import time as _tt
+                r["updated_at"] = int(_tt.time())
+            ks.save(recs)
     except Exception as e:
         elog(f"save keys: {e}")
 
@@ -3127,27 +3149,50 @@ def imp_router(api_key, cfg=None, prov_type="openai", node_id="", force=False, p
             extra += ["--router-password", pw]
         else:
             log("No password for remote router!", "warn")
+    proc = None
     try:
-        r = subprocess.run([sys.executable, str(BASE / "import" / "import_tokenharbor.py"),
-                            "--router-base", base, "--file", str(KEYS_FILE)] + extra,
-                           capture_output=True, text=True, timeout=120)
+        proc = subprocess.Popen([sys.executable, str(BASE / "import" / "import_tokenharbor.py"),
+                                 "--router-base", base, "--file", str(KEYS_FILE)] + extra,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            out, _ = proc.communicate(timeout=300)
+            rcode = proc.returncode
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, _ = proc.communicate()
+            rcode = 124
+            elog("import timed out after 300s (killed); successes already flagged, re-run resumes", "")
+    except KeyboardInterrupt:
+        # Ctrl+C: stop the child cleanly. Per-key isImported flags mean a
+        # re-run resumes exactly — show the pause prompt, not a bare exit.
+        if proc is not None:
+            try:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except Exception:
+                    proc.kill()
+            except Exception:
+                pass
+        log("Import interrupted — flagged keys stay imported, re-run resumes", "warn")
+        return False
     except Exception as e:
         elog(f"import subprocess: {e}", traceback.format_exc()[:200])
         return False
-    msg = r.stdout[-800:] if r.stdout else ""
-    err = r.stderr[-500:] if r.stderr else ""
+    msg = (out or "")[-800:]
+    err = ""
     _low = msg.lower()
     if "sudah pernah" in _low or "sudah terhubung" in _low or "already imported" in _low:
         log("Already imported", "warn")
         return True
-    if r.returncode == 0 and ("sukses" in _low or "imported" in _low):
+    if rcode == 0 and ("sukses" in _low or "imported" in _low):
         log("Imported!", "ok")
         return True
-    if "gagal" in _low or "ditolak" in _low or "error" in _low or r.returncode != 0:
-        elog("Import failed:", (msg + err).strip())
+    if "gagal" in _low or "ditolak" in _low or "error" in _low or rcode != 0:
+        elog("Import failed:", msg.strip())
     else:
         log("Import result:", "info")
-        for line in (msg + err).strip().split("\n")[-12:]:
+        for line in msg.strip().split("\n")[-12:]:
             print(f"    {DI}{line}{RS}")
     return False
 
@@ -3483,7 +3528,7 @@ def enable_free_models_for(email, password, api_key):
 
 
 def merge_key_record(rec, verified=False, free_ok=False):
-    """Update/append one KEYS_FILE record and collapse duplicate rows by email.
+    """Update/append one record and collapse duplicates by email.
     Never regresses: an existing ok/ok+free stays unless the new state is better."""
     email = rec["email"]
     verified = bool(verified or rec.get("verified"))
@@ -3493,38 +3538,27 @@ def merge_key_record(rec, verified=False, free_ok=False):
         new_status = "ok+free"
     # rank existing statuses so reverify can't downgrade ok -> pending
     _rank = {"pending": 0, "unused": 0, "verified": 1, "ok": 2, "ok+free": 3}
-    old_status = None
-    if KEYS_FILE.exists():
-        for l in KEYS_FILE.read_text().splitlines():
-            parts = l.split("|")
-            if len(parts) >= 4 and parts[0].lower() == email.lower():
-                old_status = parts[3]
-                break
-    status = new_status
-    if old_status and _rank.get(old_status, 0) > _rank.get(new_status, 0) and rec.get("api_key"):
-        status = old_status  # keep the better existing state
-    if _has_record_delimiter(email, rec.get('password', ''), rec.get('api_key', ''), status):
-        elog(f"refusing to write record with delimiter (|/newline) for {email}")
-        return False
-    new_line = f"{email}|{rec['password']}|{rec.get('api_key','')}|{status}"
-    lines = []
-    if KEYS_FILE.exists():
-        lines = [l.rstrip("\n") for l in KEYS_FILE.read_text().splitlines() if l.strip()]
-    kept = []
-    inserted = False
-    for l in lines:
-        parts = l.split("|")
-        if parts and parts[0].lower() == email.lower():
-            if not inserted:
-                kept.append(new_line)
-                inserted = True
-            # skip any additional duplicate rows for this email
-        else:
-            kept.append(l)
-    if not inserted:
-        kept.append(new_line)
     try:
-        _atomic_write_text(KEYS_FILE, "\n".join(kept) + "\n", mode=0o600)
+        ks = _keystore()
+        with ks:
+            recs = ks.load()
+            old = next((r for r in recs if r.get("email", "").lower() == email.lower()), None)
+            status = new_status
+            if old and _rank.get(old.get("status", "pending"), 0) > _rank.get(new_status, 0) and rec.get("api_key"):
+                status = old.get("status", "pending")  # keep the better existing state
+            import hashlib as _hl, time as _tt
+            if old is None:
+                old = {"email": email, "password": "", "api_key": "",
+                       "status": "pending", "imported": False, "imported_at": 0,
+                       "connection_id": "", "fingerprint": "", "updated_at": 0}
+                recs.append(old)
+            old["password"] = rec.get("password", old.get("password", ""))
+            if rec.get("api_key"):
+                old["api_key"] = rec["api_key"]
+                old["fingerprint"] = _hl.md5(rec["api_key"].encode()).hexdigest()
+            old["status"] = status
+            old["updated_at"] = int(_tt.time())
+            ks.save(recs)
     except Exception as e:
         elog("merge key record: " + str(e))
         return False

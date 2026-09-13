@@ -117,12 +117,11 @@ def main():
         print("No .env")
         return 1
 
-    accounts = []
-    if KEYS_FILE.exists():
-        for line in KEYS_FILE.read_text().splitlines():
-            parts = line.strip().split("|")
-            if len(parts) >= 4 and parts[3] == "pending" and parts[2]:
-                accounts.append({"email": parts[0], "password": parts[1], "key": parts[2]})
+    import keystore as _ksmod
+    ks = _ksmod.store()
+    accounts = [{"email": r["email"], "password": r["password"], "key": r["api_key"]}
+                for r in ks.load()
+                if r.get("status") == "pending" and r.get("api_key")]
     print(f"Pending accounts with keys: {len(accounts)}")
     if not accounts:
         print("Nothing to reverify")
@@ -186,16 +185,8 @@ def main():
 
 def _mark_ok(path, email, key):
     with _mark_lock:
-        lines = path.read_text().splitlines()
-        out = []
-        for line in lines:
-            parts = line.strip().split("|")
-            if parts and parts[0].lower() == email.lower():
-                parts[3] = "ok"
-                out.append("|".join(parts))
-            else:
-                out.append(line)
-        path.write_text("\n".join(out) + "\n")
+        import keystore as _ksmod
+        _ksmod.store().upsert(email, api_key=key, status="ok")
 
 _mark_lock = __import__("threading").Lock()
 

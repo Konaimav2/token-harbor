@@ -61,7 +61,40 @@ def _md5(s): return hashlib.md5(s.encode()).hexdigest()
 def _unique_suffix(): return "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
 
 
+def _keystore():
+    """Project keystore (JSON, per-key isImported). Falls back to None."""
+    try:
+        sys.path.insert(0, str(BASE_DIR.parent))
+        import keystore as _ks
+        return _ks.store()
+    except Exception as e:
+        warnlog(f"keystore unavailable ({str(e)[:60]}), using legacy files")
+        return None
+
+
+_KS = None
+
+
 def load_keys(path):
+    global _KS
+    _KS = _keystore()
+    if _KS is not None:
+        try:
+            known = {os.path.abspath(str(_KS.path)),
+                     os.path.abspath(str(BASE_DIR.parent / "keys.txt")),
+                     os.path.abspath(str(BASE_DIR.parent / "data" / "keys.txt"))}
+            if not path or os.path.abspath(path) in known or not (
+                    os.path.exists(path or "") and os.path.getsize(path or "") > 0):
+                recs = _KS.load()
+                return [(r["email"], r["api_key"]) for r in recs
+                        if r.get("api_key", "").startswith("thk_") and "@" in r.get("email", "")]
+            return _load_keys_txt(path)
+        except Exception as e:
+            warnlog(f"keystore read failed ({str(e)[:60]}), using legacy file")
+    return _load_keys_txt(path)
+
+
+def _load_keys_txt(path):
     if not os.path.exists(path):
         return []
     keys = []
@@ -73,13 +106,24 @@ def load_keys(path):
 
 
 def load_imported():
+    if _KS is not None:
+        try:
+            return {_md5(r["api_key"]) for r in _KS.load() if r.get("imported") and r.get("api_key")}
+        except Exception:
+            pass
     if not IMPORTED_FILE.exists():
         return set()
     with open(IMPORTED_FILE) as f:
         return {ln.strip() for ln in f if ln.strip()}
 
 
-def mark_imported(key):
+def mark_imported(key, connection_id=""):
+    if _KS is not None:
+        try:
+            if _KS.mark_imported(api_key=key, connection_id=connection_id):
+                return
+        except Exception as e:
+            warnlog(f"keystore mark failed ({str(e)[:60]}), appending legacy file")
     with open(IMPORTED_FILE, "a") as f:
         f.write(_md5(key) + "\n")
 
@@ -513,8 +557,8 @@ def main():
         except Exception as e:
             return (email, name, priority, "error", str(e)[:200])
         if resp.status_code in (200, 201):
-            mark_imported(key)
             cid = (resp.json().get("connection") or {}).get("id", "?")
+            mark_imported(key, connection_id=cid if cid != "?" else "")
             return (email, name, priority, "ok", cid)
         try:
             err = resp.json().get("error") or resp.text[:200]
@@ -523,12 +567,15 @@ def main():
         return (email, name, priority, "fail", err)
 
     # Parallel import (like STEP 2). Workers configurable.
+    # Ctrl+C safe: each success flags isImported immediately, so re-running
+    # resumes exactly where it stopped. No partial state.
     import concurrent.futures
     import threading
     _print_lock = threading.Lock()
     ok = fail = 0
     _it = list(enumerate(pending, start_conn))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=args.workers)
+    try:
         futs = {pool.submit(_import_one, email, key, i): (email, i) for i, (email, key) in _it}
         for fut in concurrent.futures.as_completed(futs):
             email, name, priority, status, detail = fut.result()
@@ -543,6 +590,16 @@ def main():
                 else:
                     fail += 1
                     elog(f"[{name.split()[-1]}] DITOLAK: {email[:20]}", detail)
+    except KeyboardInterrupt:
+        print("\n  [!] Interrupted — successes already flagged isImported=1, re-run resumes.", flush=True)
+        for _fut in list(futs):
+            _fut.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
+        print(f"\n{'='*50}")
+        oklog(f"Sukses: {ok}  |  Gagal: {fail}  |  Total: {len(pending)} (interrupted)")
+        print(f"{'='*50}")
+        return 130
+    pool.shutdown(wait=True)
 
     print(f"\n{'='*50}")
     oklog(f"Sukses: {ok}  |  Gagal: {fail}  |  Total: {len(pending)}")
