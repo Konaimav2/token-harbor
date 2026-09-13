@@ -1946,10 +1946,31 @@ def _next_proxy(c, last=None):
             log(f"Using proxy: {p[1] if len(p)>1 else '?'}:{p[2] if len(p)>2 else '?'} (IP: {ip}, order=least)", "info")
             return p
         return None
-    # top / random: iterate candidates, skip dead/failed proxies (verify live)
+    # top / random / fastest: iterate candidates, skip dead/failed proxies (verify live)
     if order == "random":
         cands = list(proxies)
         random.shuffle(cands)
+    elif order == "fastest":
+        # cached latency first (fresh <1h), uncached shuffled last (checked on demand)
+        try:
+            _cc = pm.load_check_cache() if hasattr(pm, "load_check_cache") else {}
+        except Exception:
+            _cc = {}
+        import time as _tt
+        def _clat(p):
+            try:
+                ent = _cc.get(pm._proxy_key(p)) if hasattr(pm, "_proxy_key") else None
+                if ent and ent.get("alive") and (_tt.time() - ent.get("ts", 0)) < 3600:
+                    return ent.get("latency", 0) or 999999
+            except Exception:
+                pass
+            return None
+        scored, unscored = [], []
+        for p in proxies:
+            (scored if _clat(p) is not None else unscored).append(p)
+        random.shuffle(unscored)
+        scored.sort(key=_clat)
+        cands = scored + unscored
     else:  # top
         cands = list(proxies)
     _rl_now = _load_ratelimited()
@@ -2380,6 +2401,7 @@ def create_account(c, email=None, password=None, _retry=True):
                     print(f"[swallow th-tui.py:1958] {_e}")
                     pass
             pg.on("response", _on_api_resp)
+            _t0 = time.time()
             try:
                 pg.goto("https://tokenharbor.ai/login?mode=signup", wait_until="domcontentloaded", timeout=pw_timeout_ms)
             except Exception as nav_e:
@@ -2413,6 +2435,7 @@ def create_account(c, email=None, password=None, _retry=True):
                         pass
                     return None
                 raise
+            _t_nav = time.time()
             try:
                 pg.wait_for_load_state("networkidle", timeout=min(15000, pw_timeout_ms))
             except Exception as _e:
@@ -2424,6 +2447,7 @@ def create_account(c, email=None, password=None, _retry=True):
             except Exception as _e:
                 print(f"[swallow th-tui.py:1969] {_e}")
                 pass
+            _t_sel = time.time()
             time.sleep(2)  # extra settle time for proxy
             time.sleep(1)
             # humanize: load helpers + human-like fill/click
@@ -2449,11 +2473,13 @@ def create_account(c, email=None, password=None, _retry=True):
                 _shot_fail(pg, email)
                 b.close()
                 return None
+            _t_fill = time.time()
             # solve Turnstile if present (manual via VNC or headless solver)
             try:
                 _solve_captcha(pg, c, timeout=180)
             except Exception as e:
                 dlog(f"solve captcha: {e}")
+            _t_cap = time.time()
             # wait for page to settle — check URL + body for dashboard/landing
             time.sleep(3)
             try:
@@ -2468,6 +2494,9 @@ def create_account(c, email=None, password=None, _retry=True):
             except Exception as _e:
                 print(f"[swallow th-tui.py:2010] {_e}")
                 pass
+            _t_det = time.time()
+            dlog(f"TIMING {email}: nav={_t_nav-_t0:.0f}s selector={_t_sel-_t_nav:.0f}s "
+                 f"fill={_t_fill-_t_sel:.0f}s captcha={_t_cap-_t_fill:.0f}s settle={_t_det-_t_cap:.0f}s")
             # detect dashboard vs landing page vs stall
             # SPA: URL may stay /login?mode=signup even after dashboard loads
             # Check body for dashboard-specific content
@@ -4482,7 +4511,7 @@ def menu_proxy(c):
         status = f"{G}● ON{RS}" if pcfg.get("enabled") else f"{DI}○ OFF{RS}"
         mode = pcfg.get("mode", "list")
         mode_lbl = {"list": "List", "vpngate": "VPNGate", "combo": "Combo (local+list)"}.get(mode, mode)
-        order_lbl = {"top": "Top", "random": "Random", "least": "Least Used"}.get(pcfg.get("proxy_order", "top"), "Top")
+        order_lbl = {"top": "Top", "random": "Random", "least": "Least Used", "fastest": "Fastest"}.get(pcfg.get("proxy_order", "top"), "Top")
         tmp = "yes" if pcfg.get("use_public_tempmail") else "no"
         no_del = "ON" if pcfg.get("no_delete") else "OFF"
         prox = pm.load_proxies() if pm else []
@@ -4548,6 +4577,7 @@ def menu_proxy(c):
                 ("top", "Top", "use first proxies in list"),
                 ("random", "Random", "random selection"),
                 ("least", "Least Used", "least recently used"),
+                ("fastest", "Fastest", "lowest cached latency first"),
             ])
             if sel:
                 pcfg["proxy_order"] = sel[0]
