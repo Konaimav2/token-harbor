@@ -2303,16 +2303,28 @@ def create_account(c, email=None, password=None, _retry=True):
             # Host-resolver rule must EXCLUDE the proxy host, else Chromium can't
             # resolve the proxy itself over http/https (socks5 bridge is 127.0.0.1
             # IP literal — unaffected by DNS rules).
-            _hrr = "MAP * ~NOTFOUND"
-            if proxy_parsed and proxy_parsed[1]:
-                _hrr += ", EXCLUDE " + proxy_parsed[1]
+            # Host-resolver rules: ONLY when the proxy host is an IP literal.
+            # With MAP * ~NOTFOUND Chromium cannot resolve a proxy HOSTNAME
+            # (the EXCLUDE exemption doesn't take in this build) and every
+            # tunnel fails — while IP-literal proxies (most webshare entries)
+            # need no DNS at all. Hostname proxies use system DNS instead.
+            import ipaddress as _ipa
+            _is_ip_literal = False
+            try:
+                if proxy_parsed and proxy_parsed[1]:
+                    _ipa.ip_address(proxy_parsed[1])
+                    _is_ip_literal = True
+            except Exception:
+                pass
             launch_kwargs = {"executable_path": browser_exe, "headless": headless,
                              "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
                                       "--disable-features=UseDnsHttpsSvcbAlpn",
-                                      "--host-resolver-rules=" + _hrr,
                                       "--disable-ipv6",
                                       "--webrtc-ip-handling-policy=disable_non_proxied_udp",
                                       "--disable-rtc-smoothness-algorithm"]}
+            if _is_ip_literal and proxy_parsed and proxy_parsed[1]:
+                launch_kwargs["args"] = launch_kwargs["args"] + [
+                    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE " + proxy_parsed[1]]
             try:
                 b = p.chromium.launch(**launch_kwargs)
             except Exception as le:
@@ -2351,7 +2363,25 @@ def create_account(c, email=None, password=None, _retry=True):
                 # transport-level failure (tunnel/DNS/timeout/reset): the PROXY
                 # is not proven bad — flag transient so the caller retries the
                 # SAME proxy instead of burning it.
-                if _is_transient_net(str(nav_e)):
+                _ne = str(nav_e)
+                if "ERR_TUNNEL_CONNECTION_FAILED" in _ne:
+                    # ask the proxy itself what's wrong: its error page (auth/
+                    # session/balance/throttle) beats guessing. Same context.
+                    try:
+                        pg.goto("https://www.google.com/generate_204", timeout=20000)
+                        dlog("tunnel probe: google generate_204 OK (tunnel alive, target-side flake?)")
+                    except Exception as probe_e:
+                        _pe = str(probe_e)
+                        if "ERR_TUNNEL_CONNECTION_FAILED" in _pe:
+                            try:
+                                pg.goto("https://www.google.com/", timeout=25000)
+                                txt = pg.inner_text("body", timeout=8000)[:200].replace("\n", " | ")
+                                elog(f"proxy error page: {txt}", "")
+                            except Exception as page_e:
+                                elog(f"tunnel dead + google unreachable: {str(page_e)[:120]}", "")
+                        else:
+                            dlog(f"tunnel probe: target-only failure ({_pe[:80]})")
+                if _is_transient_net(_ne):
                     c["_transient_net"] = f"{str(nav_e)[:120]}"
                     elog(f"transient net (same proxy retry): {str(nav_e)[:100]}")
                     try:
@@ -3089,15 +3119,20 @@ def run_full_flow(c, email=None, password=None, pm=None, provider_hint=None, ski
             return None
         if c.pop("_transient_net", None):
             # transport blip (tunnel/DNS/timeout): same proxy, no fail count,
-            # capped so a truly dead network still falls through to rotation.
+            # capped so a truly dead proxy rotates promptly instead of grinding.
             _tn = c.get("_transient_streak", 0) + 1
             c["_transient_streak"] = _tn
             if _tn <= 5:
                 dlog(f"transient net {_tn}/5 — retrying same proxy (not counted as proxy failure)...")
                 interruptible_sleep(3)
                 continue
-            log("network still failing after 5 transient retries — counting as proxy failure", "warn")
+            failed_ip = c.get("_last_proxy_ip")
+            if failed_ip:
+                c.setdefault("_used_proxy_ips", []).append(failed_ip)
+            proxy_fail_count = 0
             c["_transient_streak"] = 0
+            log(f"transports failing on {failed_ip or '?'} — rotating (not cooldown-marked, unproven)", "warn")
+            continue
         else:
             c["_transient_streak"] = 0
         if c.get("_local_fatal"):
