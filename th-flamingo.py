@@ -419,13 +419,30 @@ def oauth_login_session(tui, gmail, vnc_mode=False):
         return None, None, None
 
 
+def goto_retry(pg, url, tries=4, timeout=60000):
+    """GET with retries for the flaky egress. Returns True on domcontentloaded."""
+    import time as _t
+    for i in range(tries):
+        try:
+            pg.goto(url, wait_until="domcontentloaded", timeout=timeout)
+            return True
+        except Exception as e:
+            log(f"nav {i+1}/{tries} {url[:60]}: {str(e)[:50]}", "warn")
+            try:
+                pg.wait_for_timeout(5000)
+            except Exception:
+                _t.sleep(5)
+    return False
+
+
 def verify_flamingo_email(pg, tui, gmail, timeout=240):
     """Verify + earn the newsletter point. Two mail shapes:
     - email/password accounts: 6-digit code -> submit in the verify tab.
     - any account: newsletter 'Confirm Subscription' link with a token ->
       open it in-session (also flips Verified + grants +1pt).
     Returns True when verified."""
-    pg.goto(f"{DASH_BASE}/settings", wait_until="domcontentloaded", timeout=60000)
+    if not goto_retry(pg, f"{DASH_BASE}/settings"):
+        return False
     pg.wait_for_timeout(5000)
     clicked = False
     # the pink Verify Email button inside the Email Verification card
@@ -1153,7 +1170,7 @@ def plan_active(pg, plan_name="Standard"):
     redeemed data — that label tracks subscription state, not balance.
     What matters for the generator is the data allotment."""
     try:
-        pg.goto(f"{DASH_BASE}/?tab=residential", wait_until="domcontentloaded", timeout=60000)
+        goto_retry(pg, f"{DASH_BASE}/?tab=residential")
         pg.wait_for_timeout(5000)
         body = pg.inner_text("body", timeout=8000)
         idx = body.find(plan_name)
@@ -1175,7 +1192,7 @@ def plan_active(pg, plan_name="Standard"):
 
 def affiliate_points(pg):
     """Return (available_points:int, has_active_plan:bool) from affiliate page."""
-    pg.goto(f"{DASH_BASE}/affiliate", wait_until="domcontentloaded", timeout=60000)
+    goto_retry(pg, f"{DASH_BASE}/affiliate")
     pg.wait_for_timeout(5000)
     pts, active = 0, False
     try:
@@ -1257,7 +1274,7 @@ def claim_50mb(pg):
 
     NOTE: #redeem-key-btn is the *gift code* redeem — never click that.
     Vision-gated on success."""
-    pg.goto(f"{DASH_BASE}/affiliate", wait_until="domcontentloaded", timeout=60000)
+    goto_retry(pg, f"{DASH_BASE}/affiliate")
     pg.wait_for_timeout(5000)
     try:
         target = None
@@ -1316,7 +1333,7 @@ def configure_generator(pg, qty=5, sticky_min=2, sticky_max=5, countries=None):
     list w/ random State/City, Qty. Vision-gated at the end.
     """
     countries = countries or GEN_COUNTRIES
-    pg.goto(f"{DASH_BASE}/?tab=residential", wait_until="domcontentloaded", timeout=60000)
+    goto_retry(pg, f"{DASH_BASE}/?tab=residential")
     pg.wait_for_timeout(5000)
     # generator may live on the plan product page — open Standard card if needed
     try:
@@ -1543,7 +1560,6 @@ def _gen_logged_in(pg, pm, email, qty, sticky, country, plan):
         log(f"{email}: live-checked {checked}/{min(2, len(got))} sample OK")
     except Exception as e:
         log(f"live-check err: {str(e)[:60]}", "warn")
-    _vconfirm(pg, f"dashboard for {email}, proxies generated and saved")
     return added
 
 
