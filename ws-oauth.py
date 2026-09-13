@@ -244,7 +244,7 @@ with sync_playwright() as pw:
             try: body = (current.inner_text("body", timeout=5000) or "").lower()
             except Exception as _e: print(f"[swallow ws-oauth.py:210] {_e}")
 
-            if "dashboard" in curl or "verify your email" not in body and "bandwidth" not in body:
+            if "webshare.io/dashboard" in curl or ("verify your email" not in body and "bandwidth" not in body and "/dashboard" in curl):
                 # extract token from localStorage or cookies
                 token = ""
                 try:

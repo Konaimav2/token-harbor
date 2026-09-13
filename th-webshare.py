@@ -20,9 +20,11 @@ import socket  # for proxy IP resolution
 BASE = Path(__file__).resolve().parent
 PROXY_LIST = BASE / "proxy.txt"
 
-# ── Prefer project venv if it exists (isolates deps from system python) ──
+# ── Prefer project venv if it exists (script runs only; never on import:
+# a re-exec under importlib would re-run this file as __main__ with the
+# importer's argv and take live actions as a side effect of importing) ──
 _venv_py = BASE / ".venv" / "bin" / "python"
-if _venv_py.exists():
+if __name__ == "__main__" and _venv_py.exists():
     _venv_py = str(_venv_py.resolve())
     if os.path.realpath(sys.executable) != os.path.realpath(_venv_py):
         # Re-exec ourselves with the venv python

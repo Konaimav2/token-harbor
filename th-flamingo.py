@@ -27,9 +27,11 @@ from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
 
-# ── Prefer project venv if it exists ──
+# ── Prefer project venv if it exists (script runs only; never on import:
+# a re-exec under importlib would re-run this file as __main__ with the
+# importer's argv and take live actions as a side effect of importing) ──
 _venv_py = BASE / ".venv" / "bin" / "python"
-if _venv_py.exists():
+if __name__ == "__main__" and _venv_py.exists():
     _venv_py = str(_venv_py.resolve())
     if os.path.realpath(sys.executable) != os.path.realpath(_venv_py):
         os.execv(_venv_py, [_venv_py, os.path.abspath(__file__)] + sys.argv[1:])
