@@ -1774,6 +1774,18 @@ def preflight_browser(log_it=True, headless=True):
     return None
 
 
+def _is_transient_net(exc_text):
+    """Transport-level failures: proxy not proven bad — retry same proxy."""
+    t = (exc_text or "").lower()
+    return any(s in t for s in [
+        "err_tunnel_connection_failed", "err_name_not_resolved",
+        "err_connection_timed_out", "err_timed_out", "err_connection_reset",
+        "err_empty_response", "err_connection_closed", "err_network_changed",
+        "err_internet_disconnected", "timeout", "timed out",
+        "net::err_", "econnreset", "econnaborted", "etimedout",
+    ])
+
+
 def _is_local_browser_fatal(exc_text):
     t = (exc_text or "").lower()
     return ("executable doesn't exist" in t or "executable does not exist" in t
@@ -2333,7 +2345,21 @@ def create_account(c, email=None, password=None, _retry=True):
                     print(f"[swallow th-tui.py:1958] {_e}")
                     pass
             pg.on("response", _on_api_resp)
-            pg.goto("https://tokenharbor.ai/login?mode=signup", wait_until="domcontentloaded", timeout=pw_timeout_ms)
+            try:
+                pg.goto("https://tokenharbor.ai/login?mode=signup", wait_until="domcontentloaded", timeout=pw_timeout_ms)
+            except Exception as nav_e:
+                # transport-level failure (tunnel/DNS/timeout/reset): the PROXY
+                # is not proven bad — flag transient so the caller retries the
+                # SAME proxy instead of burning it.
+                if _is_transient_net(str(nav_e)):
+                    c["_transient_net"] = f"{str(nav_e)[:120]}"
+                    elog(f"transient net (same proxy retry): {str(nav_e)[:100]}")
+                    try:
+                        b.close()
+                    except Exception:
+                        pass
+                    return None
+                raise
             try:
                 pg.wait_for_load_state("networkidle", timeout=min(15000, pw_timeout_ms))
             except Exception as _e:
@@ -3061,6 +3087,19 @@ def run_full_flow(c, email=None, password=None, pm=None, provider_hint=None, ski
             return None
         if c.get("_batch_hard_reject"):
             return None
+        if c.pop("_transient_net", None):
+            # transport blip (tunnel/DNS/timeout): same proxy, no fail count,
+            # capped so a truly dead network still falls through to rotation.
+            _tn = c.get("_transient_streak", 0) + 1
+            c["_transient_streak"] = _tn
+            if _tn <= 5:
+                dlog(f"transient net {_tn}/5 — retrying same proxy (not counted as proxy failure)...")
+                interruptible_sleep(3)
+                continue
+            log("network still failing after 5 transient retries — counting as proxy failure", "warn")
+            c["_transient_streak"] = 0
+        else:
+            c["_transient_streak"] = 0
         if c.get("_local_fatal"):
             msg = c.pop("_local_fatal", "local fatal")
             log(f"Aborting {email}: {msg} (not a proxy failure — fix locally, proxies untouched)", "no")
