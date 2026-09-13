@@ -625,15 +625,19 @@ def flamingo_challenge_loop(pg, gmail, max_s=300):
                 log("consent allowed")
                 pg.wait_for_timeout(5000)
                 continue
-        # phone tap ("Verify it's you") — relay code LOUD, user taps on phone
+        # phone tap ("Verify it's you") — relay EVERY new code LOUD, user taps
         if re.search(r"Verify it'?s you|Check your", T):
             if not finding_logged:
                 log("challenge: Verify-it's-you — watch VNC, tap on phone", "warn")
                 finding_logged = True
             m = re.search(r"(?:tap|click|pilih|ketuk)[^0-9]{0,30}(\d{1,3})\b", T, re.I)
-            if m and not code_logged:
+            if m and m.group(1) != code_logged:
+                code_logged = m.group(1)
                 log(f">>> TAP {m.group(1)} ON YOUR PHONE NOW <<<", "warn")
-                code_logged = True
+            try:
+                pg.screenshot(path=str(BASE / "debug_shots" / f"flamingo_{gmail.split('@')[0]}_tap.png"))
+            except Exception:
+                pass
             continue
         # 2SV chooser -> Google Authenticator
         if "/challenge/selection" in url and re.search(
