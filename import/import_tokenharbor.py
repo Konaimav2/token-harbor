@@ -167,7 +167,17 @@ def get_connected_keys(db_path=None, remote_db=None):
             import subprocess as _sp
             from pathlib import Path as _Path
             ssh = f"ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=no {remote_db}"
-            helper = str(_Path(__file__).resolve().parent.parent / "_remote_dedup.py")
+            helper = None
+            here = _Path(__file__).resolve().parent
+            for cand in (here.parent / "_remote_dedup.py",
+                         here / "_remote_dedup.py",
+                         here.parent / "temp" / "_remote_dedup.py"):
+                if cand.exists():
+                    helper = str(cand)
+                    break
+            if not helper:
+                warnlog("Remote dedup helper (_remote_dedup.py) not found locally")
+                return None
             r = _sp.run(f"{ssh} python3 -", shell=True,
                         input=open(helper).read(), capture_output=True, text=True, timeout=30)
             if r.returncode == 0 and r.stdout.strip():

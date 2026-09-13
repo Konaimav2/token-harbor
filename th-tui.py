@@ -2885,22 +2885,55 @@ def _key_fingerprint(key):
 
 
 def load_key_checks():
-    """Load cached API-key health checks. Backward/absence safe."""
+    """Health cache view: keystore in-record health first, legacy
+    key-checks.json as fallback for emails missing from the store."""
+    merged = {}
+    try:
+        for r in _keystore().load():
+            h = r.get("health", {}) or {}
+            if h.get("state"):
+                merged[r.get("email", "")] = {
+                    "fingerprint": h.get("fingerprint", ""),
+                    "state": h.get("state", ""),
+                    "reason": h.get("reason", ""),
+                    "checked_at": h.get("checked_at", 0),
+                }
+    except Exception as e:
+        dlog(f"keystore health read: {e}")
     try:
         if KEY_CHECKS_FILE.exists():
-            data = json.loads(KEY_CHECKS_FILE.read_text())
-            return data if isinstance(data, dict) else {}
+            data = json.loads(KEY_CHECKS_FILE.read_text()) or {}
+            for k, v in (data.items() if isinstance(data, dict) else []):
+                merged.setdefault(k, v)
     except Exception as e:
         dlog(f"key check cache read: {e}")
-    return {}
+    return merged
 
 
 def save_key_checks(checks):
-    """Atomically persist health cache so interrupted writes do not corrupt it."""
+    """Persist health into keystore records (legacy file no longer written).
+
+    `checks`: {email: {fingerprint (sha16), state, reason}} — stale entries
+    for rotated keys are never attached.
+    """
     try:
-        tmp = KEY_CHECKS_FILE.with_suffix(KEY_CHECKS_FILE.suffix + ".tmp")
-        tmp.write_text(json.dumps(checks, indent=2, sort_keys=True))
-        tmp.replace(KEY_CHECKS_FILE)
+        ks = _keystore()
+        mapping = {}
+        recs = {r.get("email", "").lower(): r for r in ks.load()}
+        for email, ent in (checks or {}).items():
+            if not isinstance(ent, dict):
+                continue
+            r = recs.get(str(email).lower())
+            if r is None:
+                continue
+            if ent.get("fingerprint") and ent.get("fingerprint") != _key_fingerprint(r.get("api_key", "")):
+                continue  # stale entry for a rotated key — never attach
+            mapping[email] = {"state": ent.get("state", ""),
+                              "reason": str(ent.get("reason", ""))[:160],
+                              "checked_at": int(ent.get("checked_at", 0) or 0),
+                              "fingerprint": ent.get("fingerprint", "")}
+        if mapping:
+            ks.set_health_records(mapping)
         return True
     except Exception as e:
         elog(f"key check cache write: {e}")
@@ -3143,6 +3176,9 @@ def imp_router(api_key, cfg=None, prov_type="openai", node_id="", force=False, p
         extra.append("--force")
     if node_id:
         extra += ["--provider", node_id]
+    if router.get("remote_db"):
+        # SSH-read the live 9router DB for exact dedupe (API redacts keys)
+        extra += ["--remote-db", router["remote_db"]]
     if auth_mode == "password":
         pw = router.get("password", "")
         if pw:

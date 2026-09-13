@@ -36,6 +36,18 @@ def _md5(s):
     return hashlib.md5(s.encode()).hexdigest()
 
 
+def _sha16(s):
+    return hashlib.sha256((s or "").encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _blank(email=""):
+    return {"email": email, "password": "", "api_key": "",
+            "status": "pending", "imported": False, "imported_at": 0,
+            "connection_id": "", "fingerprint": "",
+            "health": {"state": "", "reason": "", "checked_at": 0},
+            "updated_at": _now()}
+
+
 def _now():
     return int(time.time())
 
@@ -78,12 +90,73 @@ class KeyStore:
             try:
                 data = json.loads(self.path.read_text())
                 if isinstance(data, list):
+                    if self._backfill_health(data):
+                        self.save(data)
                     return data
             except Exception:
                 pass
         recs = self._migrate()
         self.save(recs)
         return recs
+
+    def _backfill_health(self, recs):
+        """Fold key-checks.json into records missing health. Returns changed."""
+        try:
+            if not any(not r.get("health", {}).get("state") for r in recs):
+                return False
+            checks = {}
+            for cand in (BASE / "key-checks.json", DATA_DIR / "key-checks.json"):
+                if cand.exists():
+                    checks = json.loads(cand.read_text()) or {}
+                    break
+            if not checks:
+                return False
+            changed = False
+            for r in recs:
+                if r.get("health", {}).get("state"):
+                    continue
+                ent = checks.get(r.get("email", ""), {})
+                if isinstance(ent, dict) and ent.get("fingerprint") == r.get("fingerprint") \
+                        and ent.get("state"):
+                    r["health"] = {"state": ent.get("state", ""),
+                                   "reason": str(ent.get("reason", ""))[:160],
+                                   "checked_at": int(ent.get("checked_at", 0))}
+                    changed = True
+            return changed
+        except Exception:
+            return False
+
+    def set_health_bulk(self, mapping):
+        """mapping: {email: (state, reason)}. Single locked atomic save."""
+        conv = {e: {"state": v[0], "reason": v[1]} if isinstance(v, tuple) else v
+                for e, v in (mapping or {}).items()}
+        return self.set_health_records(conv)
+
+    def set_health_records(self, mapping):
+        """mapping: {email: {state, reason, checked_at?, fingerprint?}}."""
+        with self:
+            recs = self.load()
+            by_email = {r.get("email", "").lower(): r for r in recs}
+            changed = False
+            for email, ent in (mapping or {}).items():
+                if not isinstance(ent, dict):
+                    continue
+                r = by_email.get((email or "").strip().lower())
+                if r is None:
+                    continue
+                fp = ent.get("fingerprint", "")
+                if fp and fp != r.get("fingerprint") and fp != _sha16(r.get("api_key", "")):
+                    continue  # stale entry for a rotated key — never attach
+                r["health"] = {"state": ent.get("state", ""),
+                               "reason": str(ent.get("reason", ""))[:160],
+                               "checked_at": int(ent.get("checked_at", 0) or _now())}
+                if fp:
+                    r["health"]["fingerprint"] = fp
+                r["updated_at"] = _now()
+                changed = True
+            if changed:
+                self.save(recs)
+            return changed
 
     def save(self, records):
         """Atomic persist (callers should hold the lock for read-modify-write)."""
@@ -154,17 +227,28 @@ class KeyStore:
                 else:
                     password, api_key, status = parts[1], "", "unused"
                 fp = _md5(api_key) if api_key else ""
-                recs.append({
-                    "email": email,
-                    "password": password,
-                    "api_key": api_key,
-                    "status": status,
-                    "imported": bool(fp and fp in imported_md5),
-                    "imported_at": 0,
-                    "connection_id": "",
-                    "fingerprint": fp,
-                    "updated_at": _now(),
-                })
+                rec = _blank(email)
+                rec.update({"password": password, "api_key": api_key,
+                            "status": status,
+                            "imported": bool(fp and fp in imported_md5),
+                            "fingerprint": fp})
+                recs.append(rec)
+        # fold in key-checks.json health cache (email+fingerprint match)
+        try:
+            checks = {}
+            for cand in (BASE / "key-checks.json", DATA_DIR / "key-checks.json"):
+                if cand.exists():
+                    checks = json.loads(cand.read_text()) or {}
+                    break
+            for r in recs:
+                ent = checks.get(r["email"], {})
+                if isinstance(ent, dict) and ent.get("fingerprint") == r.get("fingerprint") \
+                        and ent.get("state"):
+                    r["health"] = {"state": ent.get("state", ""),
+                                   "reason": str(ent.get("reason", ""))[:160],
+                                   "checked_at": int(ent.get("checked_at", 0))}
+        except Exception:
+            pass
         # backup originals once
         try:
             BACKUP_DIR.mkdir(parents=True, exist_ok=True)
@@ -217,9 +301,7 @@ class KeyStore:
             email = (email or "").strip().lower()
             rec = next((r for r in recs if r.get("email") == email), None)
             if rec is None:
-                rec = {"email": email, "password": "", "api_key": "",
-                       "status": "pending", "imported": False, "imported_at": 0,
-                       "connection_id": "", "fingerprint": "", "updated_at": _now()}
+                rec = _blank(email)
                 recs.append(rec)
             if password is not None:
                 rec["password"] = password
