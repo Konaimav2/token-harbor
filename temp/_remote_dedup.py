@@ -26,5 +26,7 @@ for (d,) in rows:
         continue
     k = obj.get("apiKey")
     if k and isinstance(k, str):
-        keys.add(k)
+        k = k.strip().strip("'\"")
+        if k:
+            keys.add(k)
 print("\n".join(sorted(keys)))

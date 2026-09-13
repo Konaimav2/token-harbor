@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import string
 import sqlite3
 import sys
@@ -355,6 +356,110 @@ def check_keys_parallel(pending, workers=8):
     return results
 
 
+def _remote_pull_rows(remote_db):
+    """SSH-run _remote_pull.py on the router host. Returns [(id, provider, name, key)]."""
+    import subprocess as _sp
+    from pathlib import Path as _Path
+    here = _Path(__file__).resolve().parent
+    helper = None
+    for cand in (here.parent / "temp" / "_remote_pull.py",
+                 here / "_remote_pull.py",
+                 here.parent / "_remote_pull.py"):
+        if cand.exists():
+            helper = str(cand)
+            break
+    if not helper:
+        elog("Remote pull helper (temp/_remote_pull.py) not found locally")
+        return []
+    ssh = f"ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=no {remote_db}"
+    try:
+        r = _sp.run(f"{ssh} python3 -", shell=True,
+                    input=open(helper).read(), capture_output=True, text=True, timeout=60)
+    except Exception as e:
+        elog(f"Remote pull SSH error: {str(e)[:120]}")
+        return []
+    if r.returncode != 0 or not r.stdout.strip():
+        warnlog(f"Remote pull failed: {r.stderr.strip()[:120] or 'no output'}")
+        return []
+    rows = []
+    for ln in r.stdout.splitlines():
+        parts = ln.rstrip("\n").split("\t")
+        if len(parts) >= 4 and parts[3].strip():
+            rows.append((parts[0], parts[1], parts[2], parts[3].strip()))
+    return rows
+
+
+def _dummy_email(name, taken):
+    base = re.sub(r"[^a-z0-9]+", "-", (name or "router-key").strip().lower())
+    base = base.strip("-") or "router-key"
+    email = f"{base}@9router.local"
+    i = 2
+    while email in taken:
+        email = f"{base}-{i}@9router.local"
+        i += 1
+    taken.add(email)
+    return email
+
+
+def cmd_pull_sayang(args):
+    """Pull other Sayang_*/Harbor_* connections FROM 9router INTO the keystore
+    with dummy credentials — for health checks and anti-dupe only."""
+    import re as _re
+    if not args.remote_db:
+        elog("Need --remote-db user@host for pull")
+        return 1
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        import keystore as _ksmod
+        ks = _ksmod.store()
+    except Exception as e:
+        elog(f"keystore unavailable: {e}")
+        return 1
+    rows = _remote_pull_rows(args.remote_db)
+    if not rows:
+        warnlog("No rows from remote DB")
+        return 1
+    mine = [r for r in rows if r[2].lower().startswith(("sayang", "harbor"))]
+    infolog(f"{len(rows)} remote connections, {len(mine)} sayang/harbor")
+    existing_keys = {r["api_key"] for r in ks.load() if r.get("api_key")}
+    taken = {r["email"].lower() for r in ks.load()}
+    fresh = [(i, p, n, k) for i, p, n, k in mine if k not in existing_keys]
+    oklog(f"{len(mine) - len(fresh)} already in store, {len(fresh)} new to import")
+    if not fresh:
+        return 0
+    status_map = check_keys_parallel(
+        [(n, k) for _, _, n, k in fresh], workers=args.workers)
+    added = 0
+    with ks:
+        recs = ks.load()
+        by_key = {r.get("api_key"): r for r in recs}
+        for cid, prov, name, key in fresh:
+            status, detail = status_map.get((name, key), ("error", "no result"))
+            email = _dummy_email(name, taken)
+            if key in by_key:
+                continue
+            rec = _ksmod._blank(email)
+            rec.update({"password": "dummy-router-import",
+                        "api_key": key,
+                        "status": ("verified" if status == "available"
+                                   else "unverified" if status == "not_verified"
+                                   else "pending"),
+                        "imported": True,
+                        "connection_id": cid,
+                        "fingerprint": _md5(key),
+                        "health": {"state": ({"available": "live",
+                                              "not_verified": "forbidden",
+                                              "ratelimited": "ratelimited"}.get(status, "failed")),
+                                   "reason": f"pull:{detail}"[:160],
+                                   "checked_at": int(__import__("time").time())}})
+            recs.append(rec)
+            added += 1
+            oklog(f"{email} <- {name} [{status}]")
+        ks.save(recs)
+    oklog(f"Pulled {added} sayang keys (dummy creds, imported=1)")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="Import Token Harbor API keys ke 9router")
     ap.add_argument("--file", default=KEYS_FILE)
@@ -378,7 +483,12 @@ def main():
                     help="Force re-check every key via API before import (slow).")
     ap.add_argument("--workers", type=int, default=8,
                     help="Parallel workers for import (default 8)")
+    ap.add_argument("--pull-sayang", action="store_true",
+                    help="Pull sayang_*/Harbor_* connections FROM 9router INTO keystore (dummy creds, check + anti-dupe). Needs --remote-db.")
     args = ap.parse_args()
+
+    if args.pull_sayang:
+        return cmd_pull_sayang(args)
 
     keys = load_keys(args.file)
     if not keys:
