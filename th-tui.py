@@ -2815,6 +2815,11 @@ def save_key_checks(checks):
         return False
 
 
+def _is_timeout_reason(why):
+    t = (why or "").lower()
+    return "timed out" in t or "timeout" in t or "etimedout" in t
+
+
 def _classify_key_check(works, reason):
     """Map a probe result to a stable KEY-health category.
 
@@ -2910,7 +2915,7 @@ def _test_key(key, model="deepseek-v4-flash:free"):
         headers = {"Authorization": f"Bearer {key}"}
         if body is not None:
             headers["Content-Type"] = "application/json"
-        kw = dict(headers=headers, proxies=proxies, timeout=20)
+        kw = dict(headers=headers, proxies=proxies, timeout=12)
         if body is not None:
             kw["json"] = body
         # try relay first; fall back to direct if relay fails
@@ -2924,16 +2929,24 @@ def _test_key(key, model="deepseek-v4-flash:free"):
                     raise RuntimeError("relay failed")
                 return r
             except Exception as _e:
-                print(f"[swallow th-tui.py:2417] {_e}")
+                dlog(f"relay fallback to direct: {str(_e)[:80]}")
                 pass  # fall through to direct
-        # direct with 429 retry (parallel checks hit TH rate limit)
-        for attempt in range(2):
-            r = requests.request(method, target + path, **kw)
-            if r.status_code == 429 and attempt == 0:
+        # direct with retry on 429 AND on timeouts (slow relays/Tor-like paths)
+        last = None
+        for attempt in range(3):
+            try:
+                r = requests.request(method, target + path, **kw)
+            except Exception as e:
+                last = e
+                if _is_timeout_reason(str(e)) and attempt < 2:
+                    time.sleep(2)
+                    continue
+                raise
+            if r.status_code == 429 and attempt < 2:
                 time.sleep(2)
                 continue
             return r
-        return r
+        raise last
 
     def _is_json_resp(r):
         ct = r.headers.get("content-type", "")
@@ -3890,6 +3903,19 @@ def menu_tokens():
                         print(f"[swallow th-tui.py:3262] {_e}")
                         works, why = False, str(e)[:80]
                     results[rec["email"]] = (works, why)
+                    # timeouts measure the PATH, not the key: never let them
+                    # overwrite a previously proven-good state (live/ratelimited).
+                    # Only definitive HTTP verdicts change state.
+                    prev = checks.get(rec["email"], {})
+                    if (not works and _is_timeout_reason(why)
+                            and isinstance(prev, dict)
+                            and prev.get("fingerprint") == _key_fingerprint(rec["api_key"])
+                            and prev.get("state") in ("live", "ratelimited")):
+                        prev["checked_at"] = int(time.time())
+                        prev["reason"] = f"kept {prev['state']} (timeout this run): {str(why)[:80]}"
+                        checks[rec["email"]] = prev
+                        dlog(f"sticky {prev['state']}: {rec['email']} ({str(why)[:60]})")
+                        continue
                     checks[rec["email"]] = {
                         "fingerprint": _key_fingerprint(rec["api_key"]),
                         "state": _classify_key_check(works, why),
