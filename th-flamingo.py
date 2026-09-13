@@ -511,6 +511,270 @@ def verify_flamingo_email(pg, tui, gmail, timeout=240):
     return ok
 
 
+def _totp_for_gmail(gmail):
+    """TOTP code from .2fa-secrets (email|base32), computed locally (RFC 6238)."""
+    try:
+        import importlib.util as _ilu
+        spec = _ilu.spec_from_file_location("thredo", str(BASE / "th_redo.py"))
+        if spec and spec.loader:
+            r = _ilu.module_from_spec(spec)
+            spec.loader.exec_module(r)
+            if hasattr(r, "_totp_for"):
+                return r._totp_for(gmail) or ""
+    except Exception:
+        pass
+    return ""
+
+
+def _gmail_password(gmail):
+    """Gmail password from inbox ledgers (loggedmail.txt pipe, accounts.txt tab).
+    Runtime use only — callers must NEVER log it."""
+    g = gmail.strip().lower()
+    for path, sep in (("/root/projects/gmail-inbox/loggedmail.txt", "|"),
+                      ("/root/projects/gmail-inbox/accounts.txt", "\t")):
+        try:
+            with open(path) as f:
+                for ln in f:
+                    p = ln.rstrip("\n").split(sep)
+                    if len(p) >= 2 and p[0].strip().lower() == g and p[1].strip():
+                        return p[1].strip()
+        except Exception:
+            pass
+    return ""
+
+
+def _fl_click_text(pg, *texts):
+    for txt in texts:
+        for sel in [f"button:has-text('{txt}')", f"a:has-text('{txt}')",
+                    f"div[role='button']:has-text('{txt}')"]:
+            try:
+                loc = pg.locator(sel).first
+                if loc.count() and loc.is_visible(timeout=2000):
+                    loc.click(timeout=8000)
+                    return txt
+            except Exception:
+                pass
+    return ""
+
+
+def flamingo_challenge_loop(pg, gmail, max_s=300):
+    """run-batch.mjs-style Google challenge handler. Returns True on dashboard.
+
+    - phone tap: relays the tap-code LOUD (user taps on their phone, VNC live)
+    - TOTP: auto-fills from .2fa-secrets (local RFC 6238, no network)
+    - reCAPTCHA checkbox: auto-click, else human in VNC
+    - wizards (recovery/selfie/home): auto-skip
+    - unknown screens: human-assist wait, capped (no infinite loop)
+    """
+    import time as _t
+    t0 = _t.time()
+    finding_logged = code_logged = False
+    acted_on, acted_at = None, 0
+    human_waits = 0
+    last_unknown, last_unknown_at = "", 0
+
+    def acted(url):
+        nonlocal acted_on, acted_at
+        if acted_on == url and _t.time() - acted_at < 25:
+            return True
+        acted_on, acted_at = url, _t.time()
+        pg.wait_for_timeout(2000)
+        return False
+
+    def body():
+        try:
+            return (pg.inner_text("body", timeout=5000) or "")[:4000]
+        except Exception:
+            return ""
+
+    while _t.time() - t0 < max_s:
+        pg.wait_for_timeout(2500)
+        try:
+            url = pg.url or ""
+        except Exception:
+            continue
+        # OUTCOME: flamingo dashboard (not google/auth)
+        if "flamingoproxies.com" in url and "accounts.google" not in url \
+                and "auth.flamingoproxies" not in url:
+            return True
+        T = body()
+        # account chooser (first-time oauth for this browser profile)
+        if "accountchooser" in url or re.search(r"Choose an account|Pilih akun", T):
+            try:
+                tile = pg.locator(f'div[data-email="{gmail}"]').first
+                if tile.count():
+                    tile.click(timeout=6000)
+                    log("chooser clicked")
+                    pg.wait_for_timeout(4000)
+                    continue
+            except Exception:
+                pass
+            try:
+                t2 = pg.get_by_text(gmail, exact=False).first
+                if t2.count():
+                    t2.click(timeout=6000)
+                    log("chooser clicked (text)")
+                    pg.wait_for_timeout(4000)
+                    continue
+            except Exception:
+                pass
+        # oauth consent
+        if "consent" in url or re.search(r"ingin mengakses|wants to access", T, re.I):
+            if _oauth_click_text(pg, "Izinkan") or _oauth_click_text(pg, "Allow") \
+                    or _oauth_click_text(pg, "Continue") or _oauth_click_text(pg, "Lanjutkan"):
+                log("consent allowed")
+                pg.wait_for_timeout(5000)
+                continue
+        # phone tap ("Verify it's you") — relay code LOUD, user taps on phone
+        if re.search(r"Verify it'?s you|Check your", T):
+            if not finding_logged:
+                log("challenge: Verify-it's-you — watch VNC, tap on phone", "warn")
+                finding_logged = True
+            m = re.search(r"(?:tap|click|pilih|ketuk)[^0-9]{0,30}(\d{1,3})\b", T, re.I)
+            if m and not code_logged:
+                log(f">>> TAP {m.group(1)} ON YOUR PHONE NOW <<<", "warn")
+                code_logged = True
+            continue
+        # 2SV chooser -> Google Authenticator
+        if "/challenge/selection" in url and re.search(
+                r"Google Authenticator|verification code from the Google Authenticator", T):
+            if acted(url):
+                continue
+            log("2SV chooser -> Google Authenticator app")
+            try:
+                tgt = pg.evaluate("""(() => {
+                    const opts=[...document.querySelectorAll('li, [role="option"]')]
+                      .filter(x=>/Google Authenticator|verification code from the Google Authenticator/i
+                        .test((x.innerText||'').trim()) && x.offsetParent!==null
+                        && (x.innerText||'').trim().length < 120);
+                    if(!opts.length) return null;
+                    const a=opts[0].querySelector('a,[role="link"],[jsaction],button') || opts[0];
+                    const b=a.getBoundingClientRect(); return {x:b.x+b.width/2, y:b.y+b.height/2};
+                })()""")
+                if tgt and tgt.get("x") is not None:
+                    pg.mouse.click(tgt["x"], tgt["y"])
+                    pg.wait_for_timeout(2500)
+                    continue
+            except Exception:
+                pass
+            continue
+        # TOTP / one-time-code entry
+        if re.search(r"Enter the code|Enter code|one-time-code|verification code|"
+                     r"Enter security code|Get a code to sign in|g\.co/sc", T):
+            if re.search(r"Get a code to sign in|g\.co/sc", T):
+                log("g.co/sc screen -> switching to authenticator method")
+                _fl_click_text(pg, "Try another way")
+                pg.wait_for_timeout(2500)
+                continue
+            code = _totp_for_gmail(gmail)
+            if code:
+                try:
+                    inp = pg.locator("input[type='tel'], input[autocomplete='one-time-code'], "
+                                     "input[name*='code']").first
+                    if inp.count():
+                        inp.fill(code)
+                        pg.wait_for_timeout(300)
+                        _fl_click_text(pg, "Next", "Verify", "Continue")
+                        log(f"TOTP auto-filled for {gmail}")
+                        pg.wait_for_timeout(2000)
+                        continue
+                except Exception:
+                    pass
+            else:
+                log("code screen but no TOTP secret — solve in VNC (or add secret to .2fa-secrets)", "warn")
+                pg.wait_for_timeout(5000)
+                continue
+        # recovery phone/email prompt -> cancel
+        if re.search(r"Enter phone|Add a recovery phone|recovery email|"
+                     r"Make sure you can always sign in", T):
+            log("recovery prompt -> Cancel")
+            if acted(url):
+                continue
+            _fl_click_text(pg, "Cancel", "Not now", "not now")
+            continue
+        # selfie -> skip
+        if re.search(r"Selfie", T):
+            log("selfie screen -> skip (manual in VNC if needed)")
+            _fl_click_text(pg, "not now", "Not now", "Skip", "Done", "No thanks")
+            pg.wait_for_timeout(3000)
+            continue
+        # onboarding wizards -> skip
+        if re.search(r"recovery|protect your account|google one|set up|profile|"
+                     r"personalize|Save your password|Welcome", T) and re.search(
+                     r"Skip|Done|Not now|Later|No thanks", T):
+            if acted(url):
+                continue
+            log("onboarding wizard -> skip")
+            _fl_click_text(pg, "Skip", "Not now", "Done", "No thanks")
+            pg.wait_for_timeout(1500)
+            continue
+        # reCAPTCHA checkbox -> auto-click, else human
+        if re.search(r"reCAPTCHA|I'?m not a robot|Verify you are human|not a robot", T, re.I):
+            log("reCAPTCHA -> auto-click checkbox (VNC backup)")
+            try:
+                hit = pg.evaluate("(() => { const cb=document.querySelector("
+                                  "'.recaptcha-checkbox-border,[role=checkbox]');"
+                                  " if(cb){cb.click();return true;} return false; })()")
+                if hit:
+                    pg.wait_for_timeout(5000)
+                    continue
+            except Exception:
+                pass
+            pg.wait_for_timeout(4000)
+            continue
+        # password field (stale cookies) — full login fallback via ledger password
+        try:
+            pwf = pg.locator("input[type='password']").first
+            has_pw = pwf.count() and pwf.is_visible(timeout=2000)
+        except Exception:
+            has_pw = False
+        if has_pw:
+            pw = _gmail_password(gmail)
+            if pw:
+                log("stale cookies — password fallback login")
+                try:
+                    pwf.fill(pw, timeout=10000)
+                    pg.wait_for_timeout(500)
+                    _fl_click_text(pg, "Next", "Berikutnya", "Continue")
+                    pg.wait_for_timeout(3000)
+                    continue
+                except Exception:
+                    pass
+            else:
+                log("password required but no ledger password — solve in VNC", "warn")
+                pg.wait_for_timeout(30000)
+                continue
+        # wrong creds -> fail fast
+        if re.search(r"password was incorrect|couldn'?t sign you in|"
+                     r"couldn'?t find your google account|Wrong password", T):
+            log("wrong password / bad creds -> fail", "warn")
+            return False
+        # blocked -> human wait in VNC
+        if re.search(r"This browser or app may not be secure|Sign in blocked|"
+                     r"Access blocked|Account disabled", T):
+            log("security flag — check VNC (30s)", "warn")
+            pg.wait_for_timeout(30000)
+            continue
+        # unknown screen: human-assist, capped at 3
+        uk = (url or "")[:120]
+        if uk != last_unknown:
+            log(f"challenge: unknown screen, waiting in VNC ({uk[:60]})...", "warn")
+            last_unknown, last_unknown_at = uk, _t.time()
+        elif _t.time() - last_unknown_at > 60:
+            human_waits += 1
+            if human_waits >= 3:
+                log("unknown screen persists after 3 waits — giving up", "warn")
+                try:
+                    pg.screenshot(path=str(BASE / "debug_shots" / f"flamingo_{gmail.split('@')[0]}_stuck.png"))
+                except Exception:
+                    pass
+                return False
+            log(f"unknown screen {human_waits}/3 — solve in VNC, continuing watch...", "warn")
+            last_unknown_at = _t.time()
+    log("challenge loop timed out", "warn")
+    return False
+
+
 def create_oauth(tui, gmail, ref, vnc_mode=False):
     """Register via Google OAuth using a gmail session. Returns (flamingo_email, status).
 
@@ -562,40 +826,10 @@ def create_oauth(tui, gmail, ref, vnc_mode=False):
                 except Exception as e:
                     log(f"oauth nav {i+1}/3: {str(e)[:50]}", "warn")
                     pg.wait_for_timeout(5000)
-            # chooser + consent loop (same pattern as TokenHarbor oauth farm)
-            for _ in range(36):
-                pg.wait_for_timeout(5000)
-                url = pg.url or ""
-                if "flamingoproxies.com" in url and "accounts.google" not in url \
-                        and "auth.flamingoproxies" not in url:
-                    break
-                if "accountchooser" in url:
-                    try:
-                        tile = pg.locator(f'div[data-email="{gmail}"]').first
-                        if tile.count():
-                            tile.click(timeout=6000)
-                            log("chooser clicked")
-                            pg.wait_for_timeout(4000)
-                            continue
-                    except Exception:
-                        pass
-                    try:
-                        t2 = pg.get_by_text(gmail, exact=False).first
-                        if t2.count():
-                            t2.click(timeout=6000)
-                            log("chooser clicked (text)")
-                            pg.wait_for_timeout(4000)
-                            continue
-                    except Exception:
-                        pass
-                if "consent" in url or "oauth" in url:
-                    if _oauth_click_text(pg, "Izinkan") or _oauth_click_text(pg, "Allow") \
-                            or _oauth_click_text(pg, "Continue") or _oauth_click_text(pg, "Lanjutkan"):
-                        log("consent allowed")
-                        pg.wait_for_timeout(5000)
-                        continue
-            else:
-                log("oauth flow timed out", "warn")
+            # full run-batch-style challenge loop until dashboard
+            # (chooser/consent/phone-tap/TOTP/recaptcha/wizards/VNC human-wait)
+            if not flamingo_challenge_loop(pg, gmail, max_s=300):
+                log("oauth challenge unresolved — skip account", "warn")
                 return gmail, "failed"
             pg.wait_for_timeout(5000)
             ok = _vconfirm(pg, f"Flamingo dashboard logged in via Google as {gmail}")
@@ -1446,9 +1680,17 @@ def oauth_main(args, tui):
     print(f"  TH-FLAMINGO-OAUTH: {len(gmails)} gmails (direct, ref={args.ref})")
     used = load_used()
     ok = fail = 0
+    # terminal states are never retried; everything else (failed/noattr/
+    # score-retry/registered*) is fair game for another attempt
+    terminal = set()
+    if ACCOUNTS_FILE.exists():
+        for ln in ACCOUNTS_FILE.read_text().splitlines():
+            p = ln.strip().split("|")
+            if len(p) >= 4 and p[3] in ("verified", "exists"):
+                terminal.add(p[0].lower())
     for i, gmail in enumerate(gmails, 1):
-        if gmail.lower() in used:
-            log(f"[{i}/{len(gmails)}] {gmail} already attempted — skip")
+        if gmail.lower() in terminal:
+            log(f"[{i}/{len(gmails)}] {gmail} already done — skip")
             continue
         log(f"[{i}/{len(gmails)}] OAuth {gmail} ...")
         try:
