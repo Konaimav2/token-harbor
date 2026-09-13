@@ -11,18 +11,32 @@ Default is the farm's own TokenHarbor keys (deepseek-v4.1-flash:free does
 vision; deepseek-v4-flash does NOT). Override via env:
   VISION_BASE   default https://tokenharbor.ai/v1
   VISION_MODEL  default deepseek-v4.1-flash:free
+  VISION_FALLBACK_MODELS  default deepseek-v4.1-flash,gpt-4o-mini
+                          (tried in order on 400/401/404; 429/402 still
+                          rotate across keys on the same model)
+  VISION_MAX_WAIT  default 300 (cap, in seconds, on cumulative VLM waits
+                   per solve call so a dead backend can't stall a batch)
   VISION_API_KEY  default: first working key from data/keys.txt (429s skipped)
+
+Coordinate parsing is STRICT: only a JSON object with numeric "x"/"y"
+(0-1000) counts. Explanatory text without JSON yields None — never
+fabricated numbers — and callers must check for None before clicking
+(click_at refuses None rather than clicking (0,0)).
 
 Usage from a farm script:
   import vision_solve as vs
-  x, y = vs.locate_on_page(pg, "the 'I am not a robot' checkbox")
-  vs.click_at(pg, x, y)
+  pt = vs.locate_on_page(pg, "the 'I am not a robot' checkbox")
+  if pt is None:
+      ...  # no click: backend down or no coords in reply
+  else:
+      vs.click_at(pg, *pt)
   vs.solve_slider(pg, "the slider knob", "the right end of the slider track")
 """
 import base64
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent.parent
@@ -31,8 +45,54 @@ ROOT_KEYS = BASE / "keys.txt"
 
 VISION_BASE = os.environ.get("VISION_BASE", "https://tokenharbor.ai/v1")
 VISION_MODEL = os.environ.get("VISION_MODEL", "deepseek-v4.1-flash:free")
+VISION_FALLBACK_MODELS = os.environ.get(
+    "VISION_FALLBACK_MODELS", "deepseek-v4.1-flash,gpt-4o-mini")
+VISION_MAX_WAIT = float(os.environ.get("VISION_MAX_WAIT", "300"))
 
 _key_cache = ""
+
+
+def _log(msg):
+    print(f"[vision] {msg}", flush=True)
+
+
+def _model_chain(model=None, models=None):
+    """Primary model + vision-capable fallbacks, deduped, in try order."""
+    primary = model or os.environ.get("VISION_MODEL", VISION_MODEL)
+    if models is None:
+        raw = os.environ.get("VISION_FALLBACK_MODELS", VISION_FALLBACK_MODELS)
+        models = (raw or "").split(",")
+    chain = [primary]
+    for m in models or []:
+        m = (m or "").strip()
+        if m and m not in chain:
+            chain.append(m)
+    return chain
+
+
+def _cap(max_total_wait):
+    """Effective total-wait cap for one solve call (<=0/None-invalid = default)."""
+    if max_total_wait is None:
+        try:
+            return float(os.environ.get("VISION_MAX_WAIT", VISION_MAX_WAIT))
+        except Exception:
+            return 300.0
+    try:
+        cap = float(max_total_wait)
+        return cap if cap > 0 else 300.0
+    except Exception:
+        return 300.0
+
+
+def _time_left(t0, timeout, max_total_wait):
+    """Per-request timeout left under the cumulative cap, or None if capped."""
+    left = _cap(max_total_wait) - (time.monotonic() - t0)
+    if left <= 0:
+        return None
+    try:
+        return min(float(timeout), left)
+    except Exception:
+        return left
 
 
 def _iter_keys():
@@ -52,56 +112,100 @@ def _iter_keys():
             pass
 
 
-def _ask(png: bytes, prompt: str, timeout=120):
-    """POST screenshot + prompt, return raw model text (rotates keys on 429)."""
+def _ask(png: bytes, prompt: str, timeout=120, model=None, models=None):
+    """POST screenshot + prompt, return raw model text.
+
+    Model fallback chain: the configured model first, then vision-capable
+    alternates on 400/401/404 (unknown model / no vision support for the
+    key). 429/402 keep rotating across keys on the SAME model. A cached key
+    that starts failing is dropped from the cache so it can't dominate.
+    """
     import requests
     global _key_cache
     img = base64.b64encode(png).decode()
-    ordered = []
-    if _key_cache:
-        ordered.append(_key_cache)
-    ordered += [k for k in _iter_keys() if k != _key_cache]
     last = ""
-    for key in ordered:
-        try:
-            r = requests.post(
-                VISION_BASE + "/chat/completions",
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"model": VISION_MODEL, "messages": [{
-                    "role": "user", "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {
-                            "url": "data:image/png;base64," + img}}]}],
-                    "max_tokens": 120},
-                timeout=timeout)
-            if r.status_code == 200:
-                _key_cache = key
-                return r.json()["choices"][0]["message"]["content"]
-            last = f"{r.status_code}:{r.text[:80]}"
-            if r.status_code not in (429, 402):
-                break  # capability/config error — rotating keys won't help
-        except Exception as e:
-            last = str(e)[:80]
+    for mdl in _model_chain(model, models):
+        ordered = []
+        if _key_cache:
+            ordered.append(_key_cache)
+        ordered += [k for k in _iter_keys() if k != _key_cache]
+        next_model = False
+        for key in ordered:
+            try:
+                r = requests.post(
+                    VISION_BASE + "/chat/completions",
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json={"model": mdl, "messages": [{
+                        "role": "user", "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {
+                                "url": "data:image/png;base64," + img}}]}],
+                        "max_tokens": 120},
+                    timeout=timeout)
+                if r.status_code == 200:
+                    _key_cache = key
+                    return r.json()["choices"][0]["message"]["content"]
+                last = f"{mdl} {r.status_code}:{r.text[:80]}"
+                if key == _key_cache:
+                    _key_cache = ""  # sticky cached key failed — drop, rotate
+                if r.status_code in (429, 402):
+                    continue  # quota/billing — next key, same model
+                if r.status_code in (400, 401, 404):
+                    next_model = True  # capability error — next fallback model
+                break
+            except Exception as e:
+                last = f"{mdl} err:{str(e)[:80]}"
+                if key == _key_cache:
+                    _key_cache = ""  # sticky cached key failed — drop, rotate
+        if next_model:
+            continue
+        break
     raise RuntimeError(f"vision backend failed: {last}")
 
 
 def _parse_xy(text):
-    m = re.search(r"\{[^{}]*\"x\"\s*:\s*(\d+)[^{}]*\"y\"\s*:\s*(\d+)[^{}]*\}", text)
+    """Strict 0-1000 coord parse. Returns (x, y) or None.
+
+    Only a JSON object with numeric "x" and "y" counts (single or double
+    quotes, fenced or bare). The old bare-number fallback is gone on
+    purpose: scraping arbitrary integers out of explanatory prose ("there
+    are 2 boxes...") fabricates clicks. No JSON -> None, never (0,0).
+    """
+    if not text:
+        return None
+    m = re.search(r"\{[^{}]*['\"]x['\"]\s*:\s*\"?(\d{1,4})\"?"
+                  r"[^{}]*['\"]y['\"]\s*:\s*\"?(\d{1,4})\"?[^{}]*\}", text)
     if m:
         return max(0, min(1000, int(m.group(1)))), max(0, min(1000, int(m.group(2))))
-    nums = re.findall(r"\b(\d{1,4})\b", text)
-    if len(nums) >= 2:
-        return max(0, min(1000, int(nums[0]))), max(0, min(1000, int(nums[1])))
-    raise ValueError(f"no coordinates in model reply: {text[:120]}")
+    return None
 
 
-def locate(png: bytes, target: str, timeout=120):
-    """Return (x1000, y1000) for the center of `target` in a PNG screenshot."""
+def locate(png: bytes, target: str, timeout=120, model=None, models=None,
+           max_total_wait=None):
+    """Return (x1000, y1000) for the center of `target`, or None.
+
+    None means the model reply held no valid JSON coords (strict parse).
+    Backend errors still raise RuntimeError; a capped cumulative wait logs
+    and returns None.
+    """
+    t0 = time.monotonic()
     prompt = (
         "Return ONLY JSON like {\"x\": 500, \"y\": 500} with integer 0-1000 "
         "coordinates for the center of this target. No other text.\n"
         f"Target: {target}")
-    return _parse_xy(_ask(png, prompt, timeout=timeout))
+    budget = _time_left(t0, timeout, max_total_wait)
+    if budget is None:
+        _log(f"solve capped: cumulative VLM wait > {_cap(max_total_wait):.0f}s "
+             f"for target {target[:40]!r} — giving up")
+        return None
+    try:
+        return _parse_xy(_ask(png, prompt, timeout=budget,
+                              model=model, models=models))
+    except RuntimeError:
+        raise
+    except Exception as e:
+        _log(f"locate ask failed: {str(e)[:80]}")
+        return None
 
 
 def _vp_size(pg):
@@ -112,38 +216,129 @@ def _vp_size(pg):
         return 1280, 800
 
 
-def locate_on_page(pg, target: str, timeout=120):
-    """Screenshot pg, return target center in page pixels."""
-    png = pg.screenshot()
-    x1000, y1000 = locate(png, target, timeout=timeout)
+def _device_scale(pg):
+    """Page deviceScaleFactor (window.devicePixelRatio), default 1."""
+    try:
+        dsf = float(pg.evaluate("() => window.devicePixelRatio || 1"))
+        return dsf if dsf > 0 else 1.0
+    except Exception:
+        return 1.0
+
+
+def _png_size(png):
+    """Physical (w, h) of a PNG screenshot via IHDR (stdlib only)."""
+    try:
+        import struct
+        if png[:8] == b"\x89PNG\r\n\x1a\n" and len(png) >= 24:
+            w, h = struct.unpack(">II", png[16:24])
+            if w > 0 and h > 0:
+                return w, h
+    except Exception:
+        pass
+    return None, None
+
+
+def _to_page(x1000, y1000, png, pg):
+    """0-1000 coords -> page (CSS) pixels, honoring deviceScaleFactor.
+
+    Screenshots are physical pixels (CSS * DSF) while mouse input wants CSS
+    pixels, so divide the physical offset by the DSF. Falls back to the
+    viewport size when the PNG header is unreadable.
+    """
+    dsf = _device_scale(pg)
+    pw, ph = _png_size(png)
+    if pw and ph:
+        return int(x1000 / 1000 * pw / dsf), int(y1000 / 1000 * ph / dsf)
     w, h = _vp_size(pg)
     return int(x1000 / 1000 * w), int(y1000 / 1000 * h)
 
 
+def locate_on_page(pg, target: str, timeout=120, model=None, models=None,
+                   max_total_wait=None):
+    """Screenshot pg, return target center in page pixels, or None.
+
+    None = screenshot failed, VLM wait cap hit, backend error, or no valid
+    JSON coords. Never (0,0): check before clicking.
+    """
+    t0 = time.monotonic()
+    try:
+        png = pg.screenshot()
+    except Exception as e:
+        _log(f"screenshot failed: {str(e)[:60]}")
+        return None
+    budget = _time_left(t0, timeout, max_total_wait)
+    if budget is None:
+        _log(f"solve capped: cumulative VLM wait > {_cap(max_total_wait):.0f}s "
+             f"for target {target[:40]!r} — giving up")
+        return None
+    try:
+        pt = locate(png, target, timeout=budget, model=model, models=models,
+                    max_total_wait=max_total_wait)
+    except RuntimeError as e:
+        _log(f"backend failed: {str(e)[:100]}")
+        return None
+    if pt is None:
+        return None
+    return _to_page(pt[0], pt[1], png, pg)
+
+
 def click_at(pg, x, y):
+    if x is None or y is None:
+        raise ValueError("click_at: refusing to click unknown coordinates (None)")
     pg.mouse.click(x, y)
 
 
-def click_target(pg, target: str, timeout=120):
-    """Locate + click. Returns (x, y)."""
-    x, y = locate_on_page(pg, target, timeout=timeout)
-    click_at(pg, x, y)
-    return x, y
+def click_target(pg, target: str, timeout=120, model=None, models=None,
+                 max_total_wait=None):
+    """Locate + click. Returns (x, y), or None when nothing was clicked."""
+    pt = locate_on_page(pg, target, timeout=timeout, model=model,
+                        models=models, max_total_wait=max_total_wait)
+    if pt is None:
+        return None
+    click_at(pg, pt[0], pt[1])
+    return pt[0], pt[1]
 
 
 def solve_slider(pg, knob_desc="the slider knob or puzzle piece",
-                 end_desc="the right end of the slider track", timeout=120):
-    """Drag-style challenge: locate knob + track end, drag across. Returns True."""
-    import time
-    png = pg.screenshot()
-    x1, y1 = locate(png, knob_desc, timeout=timeout)
-    w, h = _vp_size(pg)
-    # second ask reuses the same screenshot (cheap, no re-capture skew)
-    x2, y2 = _parse_xy(_ask(png, (
-        "Return ONLY JSON like {\"x\": 500, \"y\": 500} with integer 0-1000 "
-        f"coordinates for: {end_desc}. No other text."), timeout=timeout))
-    sx, sy, ex, ey = (int(x1 / 1000 * w), int(y1 / 1000 * h),
-                      int(x2 / 1000 * w), int(y2 / 1000 * h))
+                 end_desc="the right end of the slider track", timeout=120,
+                 model=None, models=None, max_total_wait=None):
+    """Drag-style challenge: locate knob + track end, drag across.
+
+    Returns True on drag, False when coords/backend/cap failed (no blind
+    drag to (0,0)). Both VLM asks share one screenshot and one wait budget.
+    """
+    t0 = time.monotonic()
+    try:
+        png = pg.screenshot()
+    except Exception as e:
+        _log(f"screenshot failed: {str(e)[:60]}")
+        return False
+    budget = _time_left(t0, timeout, max_total_wait)
+    if budget is None:
+        _log(f"solve capped: cumulative VLM wait > {_cap(max_total_wait):.0f}s "
+             "for slider — giving up")
+        return False
+    try:
+        knob = locate(png, knob_desc, timeout=budget, model=model,
+                      models=models, max_total_wait=max_total_wait)
+        if knob is None:
+            return False
+        budget = _time_left(t0, timeout, max_total_wait)
+        if budget is None:
+            _log(f"solve capped: cumulative VLM wait > {_cap(max_total_wait):.0f}s "
+                 "for slider end — giving up")
+            return False
+        end = _parse_xy(_ask(png, (
+            "Return ONLY JSON like {\"x\": 500, \"y\": 500} with integer 0-1000 "
+            f"coordinates for: {end_desc}. No other text."), timeout=budget,
+            model=model, models=models))
+        if end is None:
+            return False
+    except RuntimeError as e:
+        _log(f"slider backend failed: {str(e)[:100]}")
+        return False
+    sx, sy = _to_page(knob[0], knob[1], png, pg)
+    ex, ey = _to_page(end[0], end[1], png, pg)
     pg.mouse.move(sx, sy)
     pg.mouse.down()
     steps = 24
@@ -188,28 +383,37 @@ def _visible_iframe(pg, src_part):
     return False
 
 
-def confirm(png: bytes, expectation: str, timeout=120):
+def confirm(png: bytes, expectation: str, timeout=120, model=None,
+            models=None, max_total_wait=None):
     """Vision gate: does the screenshot satisfy `expectation`?
     Returns (True/False, one-line reason). Use after every automation step."""
+    t0 = time.monotonic()
+    budget = _time_left(t0, timeout, max_total_wait)
+    if budget is None:
+        return False, (f"vision wait capped (>{_cap(max_total_wait):.0f}s) — "
+                       "backend too slow, treating as not confirmed")
     prompt = (
         "Look at this UI screenshot. Expectation: " + expectation + "\n"
         "Reply with exactly one line: YES or NO, then a hyphen, then a short "
         "reason. Example: YES - dashboard with 2GB balance visible")
     try:
-        text = _ask(png, prompt, timeout=timeout).strip().split("\n")[0]
+        text = _ask(png, prompt, timeout=budget,
+                    model=model, models=models).strip().split("\n")[0]
     except Exception as e:
         return False, f"vision backend error: {str(e)[:80]}"
     verdict = text[:3].upper() == "YES"
     return verdict, text[:160]
 
 
-def confirm_page(pg, expectation: str, timeout=120):
+def confirm_page(pg, expectation: str, timeout=120, model=None, models=None,
+                 max_total_wait=None):
     """Screenshot pg and vision-confirm `expectation`. Returns (bool, reason)."""
     try:
         png = pg.screenshot()
     except Exception as e:
         return False, f"screenshot failed: {str(e)[:60]}"
-    return confirm(png, expectation, timeout=timeout)
+    return confirm(png, expectation, timeout=timeout, model=model,
+                   models=models, max_total_wait=max_total_wait)
 
 
 def visible_challenge_kind(pg):

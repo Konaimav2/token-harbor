@@ -48,9 +48,16 @@ STEALTH_JS = """() => {
 }"""
 
 
-def _launch_browser(p, exe, headless, proxy_host=""):
-    """Real Google Chrome first (better v3 score than Chromium-for-Testing),
-    bundled chromium fallback. Returns browser."""
+def _chromium_args(proxy_host=""):
+    """ONE Chromium flag list for every browser-launch path in this file.
+
+    Union of the stealth flag (--disable-blink-features=AutomationControlled)
+    and the hardening flags th-tui.py sets (ipv6 off, WebRTC leak guards,
+    DNS HTTPS-SVCB off). Every launch fallback MUST use this — no inline
+    ad-hoc arg lists — so fallbacks can never drift (e.g. silently
+    re-enabling automation hints or leaking WebRTC IPs).
+    HRR only for IP-literal proxy hosts: with MAP * ~NOTFOUND Chromium
+    cannot resolve a proxy HOSTNAME and every tunnel fails."""
     import ipaddress as _ipa
     _ip_literal = False
     if proxy_host:
@@ -59,14 +66,21 @@ def _launch_browser(p, exe, headless, proxy_host=""):
             _ip_literal = True
         except Exception:
             pass
-    base_args = ["--no-sandbox", "--disable-dev-shm-usage",
-                 "--disable-blink-features=AutomationControlled"]
-    # HRR only for IP-literal proxy hosts: with MAP * ~NOTFOUND Chromium
-    # cannot resolve a proxy HOSTNAME and every tunnel fails.
+    args = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-features=UseDnsHttpsSvcbAlpn",
+            "--disable-ipv6",
+            "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+            "--disable-rtc-smoothness-algorithm"]
     if proxy_host and _ip_literal:
-        base_args.append("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE " + proxy_host)
-    else:
-        base_args.append("--disable-ipv6")
+        args.append("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE " + proxy_host)
+    return args
+
+
+def _launch_browser(p, exe, headless, proxy_host=""):
+    """Real Google Chrome first (better v3 score than Chromium-for-Testing),
+    bundled chromium fallback. Returns browser."""
+    base_args = _chromium_args(proxy_host)
     try:
         return p.chromium.launch(channel="chrome", headless=headless, args=base_args)
     except Exception:
@@ -78,8 +92,7 @@ def _launch_browser(p, exe, headless, proxy_host=""):
     except Exception:
         pass
     return p.chromium.launch(
-        executable_path=exe, headless=headless,
-        args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
+        executable_path=exe, headless=headless, args=_chromium_args(proxy_host))
 DEFAULT_REF = "FLGCEJ36R52S"
 
 ACCOUNTS_FILE = BASE / "flamingo_accounts.txt"
@@ -372,13 +385,13 @@ def oauth_login_session(tui, gmail, vnc_mode=False):
         return None, None, None
     pw = sync_playwright().start()
     try:
+        # DIRECT (no proxy): same unified flags as every other launch path.
         try:
             b = pw.chromium.launch(channel="chrome", headless=not vnc_mode,
-                                   args=["--no-sandbox", "--disable-dev-shm-usage",
-                                         "--disable-blink-features=AutomationControlled"])
+                                   args=_chromium_args(""))
         except Exception:
             b = pw.chromium.launch(executable_path=exe, headless=not vnc_mode,
-                                   args=["--no-sandbox", "--disable-dev-shm-usage"])
+                                   args=_chromium_args(""))
     except Exception:
         pw.stop()
         return None, None, None
@@ -474,7 +487,10 @@ def verify_flamingo_email(pg, tui, gmail, timeout=240):
         _sys.path.insert(0, str(BASE / "tools"))
         import vision_solve as _vs
         try:
-            x, y = _vs.locate_on_page(pg, "the pink Verify Email button in the Email Verification card")
+            pt = _vs.locate_on_page(pg, "the pink Verify Email button in the Email Verification card")
+            if pt is None:
+                raise RuntimeError("vision returned no coordinates (strict parse) — refusing (0,0) click")
+            x, y = pt
             pg.mouse.click(x, y)
             clicked = True
         except Exception as e:
@@ -582,6 +598,59 @@ def _fl_click_text(pg, *texts):
             except Exception:
                 pass
     return ""
+
+
+def _click_recaptcha_checkbox(pg, timeout=8000):
+    """Frame-aware reCAPTCHA checkbox click. Returns True when clicked.
+
+    The v2 checkbox lives inside the cross-origin recaptcha anchor iframe,
+    so a top-document querySelector can never see it (always-false). Find
+    the anchor frame first and act inside it; keep a top-document attempt
+    only as a last resort for same-origin embeds."""
+    try:
+        frames = list(pg.frames or [])
+    except Exception:
+        frames = []
+    anchors = [fr for fr in frames
+               if "recaptcha/api2/anchor" in ((getattr(fr, "url", "") or ""))]
+    recaps = [fr for fr in frames
+              if "recaptcha" in ((getattr(fr, "url", "") or "")) and fr not in anchors]
+    for fr in anchors + recaps:
+        for sel in (".recaptcha-checkbox-border", "#recaptcha-anchor",
+                    '[role="checkbox"]', ".recaptcha-checkbox"):
+            try:
+                loc = fr.locator(sel).first
+                if loc.count() and loc.is_visible(timeout=2000):
+                    loc.click(timeout=timeout)
+                    return True
+            except Exception:
+                pass
+        try:
+            hit = fr.evaluate("(() => { const cb=document.querySelector("
+                              "'.recaptcha-checkbox-border,#recaptcha-anchor,"
+                              "[role=checkbox],.recaptcha-checkbox');"
+                              " if(cb){cb.click();return true;} return false; })()")
+            if hit:
+                return True
+        except Exception:
+            pass
+    # last resort: same-origin embed visible from the top document
+    for sel in (".recaptcha-checkbox-border", "#recaptcha-anchor",
+                '[role="checkbox"]'):
+        try:
+            loc = pg.locator(sel).first
+            if loc.count() and loc.is_visible(timeout=2000):
+                loc.click(timeout=timeout)
+                return True
+        except Exception:
+            pass
+    try:
+        return bool(pg.evaluate("(() => { const cb=document.querySelector("
+                                "'.recaptcha-checkbox-border,#recaptcha-anchor,"
+                                "[role=checkbox]');"
+                                " if(cb){cb.click();return true;} return false; })()"))
+    except Exception:
+        return False
 
 
 def flamingo_challenge_loop(pg, gmail, max_s=300):
@@ -740,14 +809,11 @@ def flamingo_challenge_loop(pg, gmail, max_s=300):
             _fl_click_text(pg, "Skip", "Not now", "Done", "No thanks")
             pg.wait_for_timeout(1500)
             continue
-        # reCAPTCHA checkbox -> auto-click, else human
+        # reCAPTCHA checkbox -> auto-click inside its anchor iframe, else human
         if re.search(r"reCAPTCHA|I'?m not a robot|Verify you are human|not a robot", T, re.I):
             log("reCAPTCHA -> auto-click checkbox (VNC backup)")
             try:
-                hit = pg.evaluate("(() => { const cb=document.querySelector("
-                                  "'.recaptcha-checkbox-border,[role=checkbox]');"
-                                  " if(cb){cb.click();return true;} return false; })()")
-                if hit:
+                if _click_recaptcha_checkbox(pg):
                     pg.wait_for_timeout(5000)
                     continue
             except Exception:
@@ -825,13 +891,13 @@ def create_oauth(tui, gmail, ref, vnc_mode=False):
     b = None
     try:
         with sync_playwright() as p:
+            # DIRECT (no proxy): same unified flags as every other launch path.
             try:
                 b = p.chromium.launch(channel="chrome", headless=not vnc_mode,
-                                      args=["--no-sandbox", "--disable-dev-shm-usage",
-                                            "--disable-blink-features=AutomationControlled"])
+                                      args=_chromium_args(""))
             except Exception:
                 b = p.chromium.launch(executable_path=exe, headless=not vnc_mode,
-                                      args=["--no-sandbox", "--disable-dev-shm-usage"])
+                                      args=_chromium_args(""))
             ctx = b.new_context(viewport={"width": 1280, "height": 900}, locale="en-US")
             ctx.add_init_script(STEALTH_JS)
             ctx.add_cookies(gcookies)
@@ -1270,7 +1336,11 @@ def _vision_locate_click(pg, target, timeout=120):
         import sys as _sys
         _sys.path.insert(0, str(BASE / "tools"))
         import vision_solve as _vs
-        x, y = _vs.locate_on_page(pg, target, timeout=timeout)
+        pt = _vs.locate_on_page(pg, target, timeout=timeout)
+        if pt is None:
+            log(f"vision-click '{target}': no coordinates (strict parse) — skipping click", "warn")
+            return False
+        x, y = pt
         pg.mouse.click(x, y)
         log(f"vision-clicked '{target}' at ({x},{y})")
         return True
@@ -1999,15 +2069,7 @@ def gen_account(tui, email, password, proxy_parsed, qty, sticky, country, plan, 
     b = None
     try:
         with sync_playwright() as p:
-            launch_args = ["--no-sandbox", "--disable-dev-shm-usage",
-                           "--disable-blink-features=AutomationControlled"]
-            if proxy_parsed and proxy_parsed[1]:
-                import ipaddress as _ipa2
-                try:
-                    _ipa2.ip_address(proxy_parsed[1])
-                    launch_args.append("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE " + proxy_parsed[1])
-                except Exception:
-                    launch_args.append("--disable-ipv6")
+            launch_args = _chromium_args(proxy_parsed[1] if proxy_parsed and proxy_parsed[1] else "")
             try:
                 b = p.chromium.launch(channel="chrome", headless=not vnc_mode, args=launch_args)
             except Exception:

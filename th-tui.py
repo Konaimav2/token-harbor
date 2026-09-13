@@ -2114,14 +2114,240 @@ def _parse_manual_proxy(s):
     return (scheme, host, port, user, pw)
 
 
-def _solve_captcha(pg, c, timeout=180):
-    """Solve Cloudflare Turnstile during signup.
+def _th_turnstile_budget(c, default=60):
+    """Total batas waktu solve Turnstile per attempt (detik) — fail fast ke proxy berikutnya.
+    Configurable tanpa menyentuh config/grok.py: env TH_TURNSTILE_BUDGET atau
+    c['turnstile_timeout']. Dijaga jauh di bawah 180+60 agar satu proxy macet
+    tidak menahan batch."""
+    try:
+        import os as _os
+        raw = _os.environ.get("TH_TURNSTILE_BUDGET", "")
+        if raw:
+            return max(15, min(90, int(float(raw))))
+    except Exception as _e:
+        print(f"[swallow th-tui.py:turnstile-budget-env] {_e}")
+    try:
+        for _k in ("turnstile_timeout", "turnstile_budget", "captcha_timeout"):
+            if c.get(_k):
+                return max(15, min(90, int(float(c.get(_k)))))
+    except Exception as _e:
+        print(f"[swallow th-tui.py:turnstile-budget-cfg] {_e}")
+    return default
+
+
+def _th_solver_proxy_url(proxy_parsed, pm):
+    """Bangun URL proxy untuk solver (butuh kredensial penuh). Return None bila tanpa proxy."""
+    try:
+        if proxy_parsed and pm and hasattr(pm, "proxy_url"):
+            return pm.proxy_url(proxy_parsed)
+    except Exception as _e:
+        print(f"[swallow th-tui.py:solver-proxy-url] {_e}")
+    return None
+
+
+def _inject_turnstile(pg, tok):
+    """Suntik token turnstile SEBELUM submit: lewat callback React bila widget
+    render, atau lewat hidden input cf-turnstile-response bila tidak.
+    Mirror import/tokenharbor.py::_inject_turnstile."""
+    if not tok:
+        return False
+    try:
+        if pg.evaluate("typeof window.__thCb === 'function'"):
+            pg.evaluate("(t) => { window.__thCb(t); }", tok)
+            pg.wait_for_timeout(1200)
+            dlog("Turnstile token disuntik via __thCb")
+            return True
+    except Exception as _e:
+        print(f"[swallow th-tui.py:inject-cb] {_e}")
+    try:
+        pg.evaluate("""(t) => {
+            let h = document.querySelector('input[name="cf-turnstile-response"]');
+            if (!h) {
+                const form = document.querySelector('form');
+                if (!form) return false;
+                h = document.createElement('input');
+                h.type = 'hidden'; h.name = 'cf-turnstile-response';
+                form.appendChild(h);
+            }
+            h.value = t;
+            h.dispatchEvent(new Event('input', {bubbles: true}));
+            h.dispatchEvent(new Event('change', {bubbles: true}));
+            return true;
+        }""", tok)
+        dlog("Turnstile token disuntik via hidden input cf-turnstile-response")
+        return True
+    except Exception as _e:
+        print(f"[swallow th-tui.py:inject-hidden] {_e}")
+    return False
+
+
+def _load_grok_mod():
+    """Load solver dari config/grok.py (fallback BASE/grok.py bila ada)."""
+    import importlib.util as _ilu
+    import os as _os
+    for _rel in ("config/grok.py", "grok.py"):
+        try:
+            _p = str(BASE / _rel)
+            if not _os.path.exists(_p):
+                continue
+            g = _ilu.spec_from_file_location("grok", _p)
+            gm = _ilu.module_from_spec(g)
+            g.loader.exec_module(gm)
+            return gm
+        except Exception as e:
+            dlog(f"load grok ({_rel}): {e}")
+            continue
+    return None
+
+
+def _scrape_thk_from_page(pg):
+    """Kumpulkan kandidat thk_ dari body text, nilai input modal, dan DOM
+    (code/pre/input). Return key pertama atau ''."""
+    pat = r"thk_[a-zA-Z0-9_-]{20,}"
+    try:
+        body2 = pg.inner_text("body", timeout=8000) or ""
+        m = re.search(pat, body2)
+        if m:
+            return m.group(0)
+    except Exception as _e:
+        print(f"[swallow th-tui.py:scrape-body] {_e}")
+    try:
+        dump = pg.evaluate("""() => {
+            const out = [];
+            document.querySelectorAll('input').forEach(el => { if (el.value) out.push(el.value); });
+            document.querySelectorAll('code, pre, span, div, p, textarea').forEach(el => {
+                const t = (el.innerText || '').trim();
+                if (t && t.length < 300) out.push(t);
+            });
+            return out.join('\\n');
+        }""") or ""
+        m = re.search(pat, dump)
+        if m:
+            return m.group(0)
+    except Exception as _e:
+        print(f"[swallow th-tui.py:scrape-dom] {_e}")
+    try:
+        for _sel in ('input[readonly]', 'input[type="text"]'):
+            try:
+                _loc = pg.locator(_sel)
+                _n = _loc.count()
+            except Exception:
+                continue
+            for _i in range(min(_n, 10)):
+                try:
+                    _v = _loc.nth(_i).input_value(timeout=2000) or ""
+                    m = re.search(pat, _v)
+                    if m:
+                        return m.group(0)
+                except Exception:
+                    continue
+    except Exception as _e:
+        print(f"[swallow th-tui.py:scrape-input] {_e}")
+    return ""
+
+
+def _fetch_key_via_account_api(pg):
+    """Ambil key lewat account API memakai cookies browser (same-origin fetch).
+    Return key atau ''."""
+    for _p in ("/api/v1/account/api-keys", "/api/account/api-keys",
+               "/api/v1/api-keys", "/api/api-keys"):
+        try:
+            data = pg.evaluate(
+                "(p) => fetch(p, {credentials: 'include'})"
+                ".then(r => r.ok ? r.text() : '').catch(() => '')", _p) or ""
+            if not data:
+                continue
+            m = re.search(r"thk_[a-zA-Z0-9_-]{20,}", data)
+            if m:
+                dlog(f"API key tertangkap via account API ({_p})")
+                return m.group(0)
+            try:
+                j = json.loads(data)
+                _cands = []
+                if isinstance(j, dict):
+                    for _k in ("data", "keys", "items", "results"):
+                        if isinstance(j.get(_k), list):
+                            _cands = j[_k]
+                            break
+                    else:
+                        _cands = [j]
+                elif isinstance(j, list):
+                    _cands = j
+                for _it in _cands:
+                    if isinstance(_it, dict):
+                        for _fk in ("key", "accessToken", "token", "value", "apiKey"):
+                            _v = _it.get(_fk) or ""
+                            if isinstance(_v, str) and re.match(r"thk_[a-zA-Z0-9_-]{20,}", _v):
+                                dlog(f"API key tertangkap via account API field ({_p})")
+                                return _v
+            except Exception:
+                continue
+        except Exception as _e:
+            print(f"[swallow th-tui.py:account-api] {_e}")
+            continue
+    return ""
+
+
+def _create_and_capture_key(pg, _hz, pw_timeout_ms, email):
+    """Urutan capture key: scrape awal → modal +New key → scrape modal/input/DOM
+    → account API. Return key atau '' (tidak pernah raise)."""
+    api_key = ""
+    for attempt in range(3):
+        try:
+            pg.goto("https://tokenharbor.ai/dashboard/api-keys", wait_until="domcontentloaded", timeout=pw_timeout_ms)
+            time.sleep(3)
+            api_key = _scrape_thk_from_page(pg)
+            if api_key:
+                break
+            # click + New key, fill label, create
+            try:
+                if _hz:
+                    _hz.human_click(pg, pg.locator('button:has-text("+ New key")'))
+                    time.sleep(1.5)
+                    _hz.human_type(pg, pg.locator('input[placeholder*="label"], input[name*="label"], input[type="text"]'), "main")
+                    time.sleep(1)
+                    _hz.human_click(pg, pg.locator('button:has-text("Create key"), button:has-text("Create")'))
+                else:
+                    pg.click('button:has-text("+ New key")', timeout=8000)
+                    time.sleep(2)
+                    pg.fill('input[placeholder*="label"], input[name*="label"], input[type="text"]', "main", timeout=8000)
+                    time.sleep(1)
+                    pg.click('button:has-text("Create key"), button:has-text("Create")', timeout=8000)
+                time.sleep(3)
+            except Exception as e:
+                log(f"key modal attempt {attempt+1}: {str(e)[:50]}", "warn")
+            api_key = _scrape_thk_from_page(pg)
+            if api_key:
+                break
+            api_key = _fetch_key_via_account_api(pg)
+            if api_key:
+                break
+        except Exception as e:
+            elog(f"api key attempt {attempt+1} {email}: {str(e)[:80]}")
+            time.sleep(2)
+    if not api_key:
+        try:
+            api_key = _fetch_key_via_account_api(pg)
+        except Exception as _e:
+            print(f"[swallow th-tui.py:capture-final-api] {_e}")
+    if api_key:
+        dlog(f"API key tertangkap untuk {email}")
+    else:
+        log(f"Dashboard tercapai tapi key tidak ditemukan untuk {email} — verifikasi ditunda", "warn")
+    return api_key
+
+
+def _solve_captcha(pg, c, timeout=180, proxy=None, pm=None):
+    """Solve Cloudflare Turnstile SEBELUM submit (caller wajib _inject_turnstile).
     - vnc_mode: manual solve via VNC — boss watches the visible browser and
       clicks the checkbox; we poll for the turnstile token (cheap + vision-friendly).
-    - headless: try grok.solve_turnstile_bycf (Camoufox-based).
+    - headless: BYCF dulu, gagal → fallback camoufox lokal (proxy aktif
+      diteruskan ke keduanya). Total dibatasi budget (_th_turnstile_budget,
+      default 60s) agar fail fast ke proxy berikutnya.
     Returns the token string or None.
     """
-    import urllib.parse as _up
+    _budget = min(timeout, _th_turnstile_budget(c))
+    dlog(f"Turnstile terdeteksi — budget solve {_budget}s (fail fast ke proxy berikutnya)")
     # detect turnstile iframe presence (FrameLocator has no is_visible/count
     # on all versions — use a plain Locator for detection)
     has_ts = False
@@ -2144,7 +2370,7 @@ def _solve_captcha(pg, c, timeout=180):
 
     if c.get("vnc_mode"):
         log("Turnstile detected — solve it in the VNC browser (checkbox)", "warn")
-        for _ in range(int(timeout / 2)):
+        for _ in range(max(1, int(_budget / 2))):
             try:
                 tok = pg.evaluate("() => document.querySelector('[name=\"cf-turnstile-response\"]')?.value || ''")
                 if tok:
@@ -2157,26 +2383,81 @@ def _solve_captcha(pg, c, timeout=180):
         log("Turnstile not solved manually in time", "warn")
         return None
 
-    # headless: try BYCF/Camoufox solver
+    # headless: BYCF dulu, gagal → fallback camoufox lokal. Keduanya lewat
+    # proxy aktif; total dibatasi _budget (keputusan fallback lokal + logging,
+    # tanpa menyentuh config/grok.py).
+    _t0 = time.time()
+    _ensure_deps("curl_cffi")
+    gm = _load_grok_mod()
+    if gm is None:
+        dlog("headless turnstile: modul solver tidak ditemukan (config/grok.py)")
+        return None
+    sitekey = ""
     try:
-        _ensure_deps("curl_cffi")
-        import importlib.util as _ilu
-        sys.path.insert(0, str(BASE))
-        g = _ilu.spec_from_file_location("grok", str(BASE / "grok.py"))
-        gm = _ilu.module_from_spec(g)
-        g.loader.exec_module(gm)
-        sitekey = ""
         m = re.search(r'sitekey["\s:=]+([A-Za-z0-9_-]{20,})', pg.content())
         if m:
             sitekey = m.group(1)
-        if sitekey:
-            log(f"Solving Turnstile headless (sitekey {sitekey[:12]}...)", "info")
-            tok = gm.solve_turnstile_bycf(sitekey=sitekey, page_url=pg.url)
-            if tok:
-                log("Turnstile solved (headless)", "ok")
-                return tok
+    except Exception as _e:
+        print(f"[swallow th-tui.py:sitekey] {_e}")
+    if not sitekey:
+        try:
+            sitekey = str(getattr(gm, "TURNSTILE_SITEKEY", "") or "")
+        except Exception:
+            sitekey = ""
+    if not sitekey:
+        dlog("headless turnstile: sitekey tidak ditemukan")
+        return None
+    try:
+        _page_url = pg.url
+    except Exception:
+        _page_url = "https://tokenharbor.ai/login?mode=signup"
+    proxy_url = _th_solver_proxy_url(proxy, pm)
+    try:
+        _ph = pm.proxy_url(proxy, hide_password=True) if (proxy and pm) else "langsung"
+    except Exception:
+        _ph = "?"
+    log(f"Solving Turnstile headless (sitekey {sitekey[:12]}..., via {_ph})", "info")
+    # — fase 1: BYCF (porsi ~setengah budget, maks 30s) —
+    _bycf_timeout = max(12, min(30, _budget - 20)) if _budget > 20 else min(12, _budget)
+    tok = None
+    try:
+        import requests as _rq
+        _api = str(getattr(gm, "BYCF_API", "") or "")
+        _hdr = dict(getattr(gm, "BYCF_HEADERS", {}) or {})
+        if not _api:
+            raise RuntimeError("BYCF_API kosong")
+        _resp = _rq.post(_api, json={"url": _page_url, "siteKey": sitekey, "proxy": proxy_url},
+                         headers=_hdr, timeout=_bycf_timeout)
+        if _resp.status_code != 200:
+            raise RuntimeError(f"bycf http {_resp.status_code}: {_resp.text[:120]}")
+        _data = _resp.json()
+        if not _data.get("success"):
+            raise RuntimeError(f"bycf gagal: {_data.get('error', _data)}")
+        _tok = _data.get("data") or _data.get("token")
+        if not _tok or not isinstance(_tok, str) or len(_tok) < 40:
+            raise RuntimeError(f"bycf token tidak valid: {str(_tok)[:60]!r}")
+        tok = _tok
     except Exception as e:
-        dlog(f"headless turnstile: {e}")
+        dlog(f"BYCF gagal ({str(e)[:100]}), fallback ke camoufox")
+        tok = None
+    if tok:
+        log("Turnstile solved (BYCF)", "ok")
+        return tok
+    # — fase 2: camoufox lokal dengan sisa budget; tidak cukup → fail fast —
+    _remain = _budget - (time.time() - _t0)
+    if _remain < 10:
+        log(f"Turnstile budget {_budget}s habis setelah BYCF — lanjut proxy berikutnya", "warn")
+        return None
+    try:
+        _ensure_deps("camoufox")
+        tok = gm.solve_turnstile_camoufox(sitekey=sitekey, page_url=_page_url,
+                                          proxy=proxy_url, timeout_ms=int(_remain * 1000))
+        if tok:
+            log("Turnstile solved (camoufox)", "ok")
+            return tok
+    except Exception as e:
+        dlog(f"camoufox turnstile: {e}")
+        log(f"Turnstile gagal (BYCF + camoufox, {_budget}s) — lanjut proxy berikutnya", "warn")
     return None
 
 
@@ -2528,6 +2809,9 @@ def create_account(c, email=None, password=None, _retry=True):
             except Exception as _e:
                 print(f"[swallow th-tui.py:2004] {_e}")
                 _hz = None
+            # Turnstile-first: isi kredensial dulu, solve SEBELUM submit,
+            # suntik token ke halaman, BARU submit (token yang di-solve
+            # sesudah submit terbuang sia-sia).
             try:
                 if _hz:
                     # mistakes=False: typo simulation is the long tail (TIMING
@@ -2536,23 +2820,38 @@ def create_account(c, email=None, password=None, _retry=True):
                     _hz.human_type(pg, pg.locator('input[name="email"]'), email, mistakes=False)
                     _hz.human_type(pg, pg.locator('input[name="password"]'), password, mistakes=False)
                     _hz.rand_delay(0.4, 1.2)
-                    _hz.human_click(pg, pg.locator('button[type="submit"]'))
                 else:
                     pg.fill('input[name="email"]', email)
                     pg.fill('input[name="password"]', password)
-                    pg.click('button[type="submit"]', timeout=30000)
             except Exception as e:
                 elog(f"form fill/submit failed: {_explain_signup_fail(str(e), '', '')}")
                 _shot_fail(pg, email)
                 b.close()
                 return None
             _t_fill = time.time()
-            # solve Turnstile if present (manual via VNC or headless solver)
+            # detect Turnstile SEBELUM submit — solve (BYCF lalu fallback
+            # camoufox, lewat proxy aktif), suntik token, baru submit.
+            _ts_tok = None
             try:
-                _solve_captcha(pg, c, timeout=180)
+                _ts_tok = _solve_captcha(pg, c, timeout=180, proxy=proxy_parsed, pm=pm)
             except Exception as e:
                 dlog(f"solve captcha: {e}")
+            if _ts_tok:
+                _inject_turnstile(pg, _ts_tok)
+            else:
+                dlog("Turnstile: lanjut tanpa token (tidak terdeteksi / solve gagal — fail fast ke submit)")
             _t_cap = time.time()
+            try:
+                if _hz:
+                    _hz.human_click(pg, pg.locator('button[type="submit"]'))
+                else:
+                    pg.click('button[type="submit"]', timeout=30000)
+            except Exception as e:
+                elog(f"form fill/submit failed: {_explain_signup_fail(str(e), '', '')}")
+                _shot_fail(pg, email)
+                b.close()
+                return None
+            _t_sub = time.time()
             # wait for page to settle — check URL + body for dashboard/landing
             time.sleep(3)
             try:
@@ -2569,7 +2868,7 @@ def create_account(c, email=None, password=None, _retry=True):
                 pass
             _t_det = time.time()
             dlog(f"TIMING {email}: nav={_t_nav-_t0:.0f}s selector={_t_sel-_t_nav:.0f}s "
-                 f"fill={_t_fill-_t_sel:.0f}s captcha={_t_cap-_t_fill:.0f}s settle={_t_det-_t_cap:.0f}s")
+                 f"fill={_t_fill-_t_sel:.0f}s captcha={_t_cap-_t_fill:.0f}s submit={_t_sub-_t_cap:.0f}s settle={_t_det-_t_sub:.0f}s")
             # detect dashboard vs landing page vs stall
             # SPA: URL may stay /login?mode=signup even after dashboard loads
             # Check body for dashboard-specific content
@@ -2594,46 +2893,12 @@ def create_account(c, email=None, password=None, _retry=True):
             on_dashboard = "dashboard" in url or "api-keys" in url or "dashboard" in body or "api-keys" in body or any(s in body for s in _dash_signals)
             if on_dashboard:
                 dlog(f"Account created + dashboard reached for {email}")
-                # robust API key creation: retry modal, fall back to existing key on page
-                api_key = ""
-                for attempt in range(3):
-                    try:
-                        pg.goto("https://tokenharbor.ai/dashboard/api-keys", wait_until="domcontentloaded", timeout=pw_timeout_ms)
-                        time.sleep(3)
-                        body2 = pg.inner_text("body", timeout=10000)
-                        for mm in re.finditer(r"thk_[a-zA-Z0-9_-]{20,}", body2):
-                            api_key = mm.group(0)
-                            break
-                        if api_key:
-                            break
-                        # click + New key, fill label, create
-                        try:
-                            if _hz:
-                                _hz.human_click(pg, pg.locator('button:has-text("+ New key")'))
-                                time.sleep(1.5)
-                                _hz.human_type(pg, pg.locator('input[placeholder*="label"], input[name*="label"], input[type="text"]'), "main")
-                                time.sleep(1)
-                                _hz.human_click(pg, pg.locator('button:has-text("Create key"), button:has-text("Create")'))
-                            else:
-                                pg.click('button:has-text("+ New key")', timeout=8000)
-                                time.sleep(2)
-                                pg.fill('input[placeholder*="label"], input[name*="label"], input[type="text"]', "main", timeout=8000)
-                                time.sleep(1)
-                                pg.click('button:has-text("Create key"), button:has-text("Create")', timeout=8000)
-                            time.sleep(3)
-                        except Exception as e:
-                            log(f"key modal attempt {attempt+1}: {str(e)[:50]}", "warn")
-                        body2 = pg.inner_text("body", timeout=10000)
-                        for mm in re.finditer(r"thk_[a-zA-Z0-9_-]{20,}", body2):
-                            api_key = mm.group(0)
-                            break
-                        if api_key:
-                            break
-                    except Exception as e:
-                        elog(f"api key attempt {attempt+1} {email}: {str(e)[:80]}")
-                        time.sleep(2)
+                # robust API key creation: modal → nilai input modal → scrape
+                # DOM → account API. verified=True HANYA bila key benar-benar
+                # tertangkap (jangan pernah save verified dengan api_key kosong).
+                api_key = _create_and_capture_key(pg, _hz, pw_timeout_ms, email)
                 b.close()
-                return {"email": email, "password": password, "api_key": api_key, "verified": False}
+                return {"email": email, "password": password, "api_key": api_key, "verified": bool(api_key)}
             # NOTE: "already on board" deliberately NOT in this list — it matches
             # landing-page boilerplate ("Already on board? Sign in") and caused
             # false terminal + false USED marking on stalled signups.
@@ -2702,6 +2967,14 @@ def create_account(c, email=None, password=None, _retry=True):
                     try:
                         pg.fill('input[name="email"]', email)
                         pg.fill('input[name="password"]', password)
+                        # retry submit juga Turnstile-first: solve sebelum klik
+                        _rt = None
+                        try:
+                            _rt = _solve_captcha(pg, c, timeout=60, proxy=proxy_parsed, pm=pm)
+                        except Exception as _e:
+                            dlog(f"solve captcha (retry): {_e}")
+                        if _rt:
+                            _inject_turnstile(pg, _rt)
                         pg.click('button[type="submit"]', timeout=10000)
                         # wait for page to settle after submit
                         try:
@@ -2718,6 +2991,9 @@ def create_account(c, email=None, password=None, _retry=True):
                         if _is_dash:
                             dlog(f"Retry submit succeeded — dashboard reached for {email}")
                             on_dashboard = True
+                            _rk = _create_and_capture_key(pg, _hz, pw_timeout_ms, email)
+                            b.close()
+                            return {"email": email, "password": password, "api_key": _rk, "verified": bool(_rk)}
                         else:
                             _why_signup = _explain_signup_fail('', url_now, body[:120])
                             _api = _api_errors[-1] if _api_errors else 'none'

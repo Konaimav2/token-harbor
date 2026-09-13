@@ -144,11 +144,19 @@ def th_challenge_loop(pg, email, max_s=300):
         if re.search(r"Verifikasi info|verify your info|phone verification|QR code|scan the QR", T):
             _log("manual phone/QR verification — waiting 30s in VNC (human must scan)")
             time.sleep(30); continue
-        # reCAPTCHA
+        # reCAPTCHA → click checkbox inside anchor iframe (top document can't see cross-origin iframe)
         if re.search(r"reCAPTCHA|I'?m not a robot|Verify you are human|not a robot", T, re.I):
             _log("reCAPTCHA detected — auto-click checkbox")
             try:
-                clicked = pg.evaluate("(() => { const cb=document.querySelector('.recaptcha-checkbox-border,[role=checkbox]'); if(cb){cb.click();return true;} return false; })()")
+                clicked = False
+                for _fr in pg.frames:
+                    if "/anchor" in (_fr.url or "") and "recaptcha" in (_fr.url or ""):
+                        if not _fr.evaluate("() => !!document.querySelector('.recaptcha-checkbox-checked')"):
+                            _cb = _fr.locator(".recaptcha-checkbox-border").first
+                            if _cb.count():
+                                _cb.click(timeout=6000)
+                                clicked = True
+                        break
                 if clicked: _log("clicked reCAPTCHA"); time.sleep(5); continue
             except Exception as _e: print(f"[swallow th_redo.py:141] {_e}")
             time.sleep(4); continue
@@ -529,38 +537,78 @@ def test_key(api_key):
     except Exception as e:
         return f"direct_err:{e}"
 
+
+def _launch_browser(pw, headless, args):
+    """Chromium fallback chain: bundled absolute path → channel="chrome" → system path via which."""
+    import shutil
+    # 1. bundled chromium absolute path first
+    try:
+        _bundled = Path(str(pw.chromium.executable_path)).resolve()
+        if _bundled.exists():
+            try:
+                return pw.chromium.launch(executable_path=str(_bundled), headless=headless, args=args)
+            except Exception as e:
+                _log(f"bundled chromium launch fail: {str(e)[:80]} — trying channel=chrome")
+    except Exception as _e: print(f"[swallow th_redo.py:bundled] {_e}")
+    # 2. channel="chrome"
+    try:
+        return pw.chromium.launch(channel="chrome", headless=headless, args=args)
+    except Exception as e:
+        _log(f"channel=chrome launch fail: {str(e)[:80]} — trying system chrome")
+    # 3. absolute system path via shutil.which
+    for _cand in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        _p = shutil.which(_cand)
+        if _p:
+            try:
+                return pw.chromium.launch(executable_path=_p, headless=headless, args=args)
+            except Exception as e:
+                _log(f"system chrome {_p} launch fail: {str(e)[:80]}")
+                continue
+    raise SystemExit("no usable chromium found (bundled chromium missing, channel=chrome unavailable, no google-chrome/chromium in PATH)")
+
+
 if __name__ == "__main__":
     accounts = parse_accounts()
     print(f"accounts: {accounts}")
     from playwright.sync_api import sync_playwright
     results = {}
     with sync_playwright() as pw:
-        b = pw.chromium.launch(executable_path="/usr/bin/google-chrome",
-                               headless=not VNC, args=["--no-sandbox", "--disable-gpu"])
-        for email in accounts:
-            ctx = b.new_context(viewport={"width": 1280, "height": 900})
-            pg_th = ctx.new_page()
-            # gmail locked check via mailg API (fast, no browser)
-            import requests as _rq, urllib.parse as _up
-            try:
-                _em = _up.quote(email)
-                _msgs = _rq.get(f"{MAILG_API}/api/accounts/{_em}/messages?limit=1",
-                                headers={"X-API-Key": _mailg_key()}, timeout=8)
-                if _msgs.status_code != 200:
-                    print(f"⛔ {email}: mailg API auth fail ({_msgs.status_code})")
-                    results[email] = "mailg_auth_fail"; ctx.close(); continue
-            except Exception as e:
-                print(f"⛔ {email}: mailg API down: {e}")
-                results[email] = "mailg_down"; ctx.close(); continue
-            key = process_account(ctx, None, pg_th, email)
-            if key:
-                status = test_key(key)
-                print(f"  relay test: {status}")
-                results[email] = {"key": key[:18] + "...", "status": status}
-            else:
-                results[email] = "failed"
-            ctx.close()
-        b.close()
+        b = _launch_browser(pw, headless=not VNC,
+                            args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"])
+        try:
+            for email in accounts:
+                ctx = None
+                try:
+                    ctx = b.new_context(viewport={"width": 1280, "height": 900})
+                    pg_th = ctx.new_page()
+                    # gmail locked check via mailg API (fast, no browser)
+                    import requests as _rq, urllib.parse as _up
+                    try:
+                        _em = _up.quote(email)
+                        _msgs = _rq.get(f"{MAILG_API}/api/accounts/{_em}/messages?limit=1",
+                                        headers={"X-API-Key": _mailg_key()}, timeout=8)
+                        if _msgs.status_code != 200:
+                            print(f"⛔ {email}: mailg API auth fail ({_msgs.status_code})")
+                            results[email] = "mailg_auth_fail"; continue
+                    except Exception as e:
+                        print(f"⛔ {email}: mailg API down: {e}")
+                        results[email] = "mailg_down"; continue
+                    key = process_account(ctx, None, pg_th, email)
+                    if key:
+                        status = test_key(key)
+                        print(f"  relay test: {status}")
+                        results[email] = {"key": key[:18] + "...", "status": status}
+                    else:
+                        results[email] = "failed"
+                finally:
+                    # closes ctx on ALL exits incl. SystemExit/KeyboardInterrupt
+                    try:
+                        if ctx is not None: ctx.close()
+                    except Exception as _e: print(f"[swallow th_redo.py:ctx] {_e}")
+        finally:
+            # closes browser on ALL exits incl. SystemExit/KeyboardInterrupt
+            try: b.close()
+            except Exception as _e: print(f"[swallow th_redo.py:browser] {_e}")
     print("\n=== SUMMARY ===")
     for k, v in results.items(): print(k, "->", v)
 

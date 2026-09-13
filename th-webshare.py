@@ -12,7 +12,7 @@ Usage:
   python3 th-webshare.py --count 5 --vnc         # visible browser (solve captcha manually)
   python3 th-webshare.py --count 5 --captcha-key XXX --captcha-provider 2captcha
 """
-import os, sys, time, json, random, re, argparse, traceback
+import os, sys, time, json, random, re, argparse, traceback, threading
 import importlib.util
 from pathlib import Path
 import socket  # for proxy IP resolution
@@ -51,9 +51,49 @@ REGISTER_URL = "https://dashboard.webshare.io/register?source=login_signup_link"
 API_BASE = "https://proxy.webshare.io/api/v2"
 RECAPTCHA_SITEKEY = "6LeHZ6UUAAAAAKat_YS--O2tj_by3gv3r_l03j9d"
 
+# ── Cooperative solve cancellation + per-account solve deadline ──
+# STOP wakes every solver sleep immediately (Event.wait instead of time.sleep).
+# Solve budget: total seconds per account from first solver attempt
+# (default 240s, override via env WS_SOLVE_BUDGET).
+STOP = threading.Event()
+
+
+def _solve_budget_s():
+    try:
+        return max(1.0, float(os.environ.get("WS_SOLVE_BUDGET", "240") or 240))
+    except Exception:
+        return 240.0
+
+
+def _solve_expired(t0):
+    if STOP.is_set():
+        return True
+    try:
+        return (time.monotonic() - float(t0)) >= _solve_budget_s()
+    except Exception:
+        return False
+
+
+def _wsleep(sec):
+    """Interruptible sleep — returns True if STOP was set (caller should abort)."""
+    try:
+        return bool(STOP.wait(timeout=float(sec)))
+    except Exception:
+        time.sleep(sec)
+        return STOP.is_set()
+
 
 def log(msg, icon="info"):
     print(f"  - {msg}", flush=True)
+
+
+def _close_browser(b):
+    """Best-effort browser close (never raises, never masks the real outcome)."""
+    try:
+        if b is not None:
+            b.close()
+    except Exception as _e:
+        print(f"[swallow th-webshare.py:close] {_e}")
 
 
 def _load_mail_servers():
@@ -362,10 +402,10 @@ def _verify_in_browser(pg, email):
                 print(f"[swallow th-webshare.py:353] {_e}")
                 pass
             log(f"Banner STILL present for {email} after activation visit", "warn")
+            return False
         except Exception as e:
             log(f"Dashboard reload check failed: {str(e)[:50]}", "warn")
-        return True
-        return False
+            return False
     except Exception as e:
         log(f"Verify in browser for {email}: {str(e)[:50]}", "warn")
         return False
@@ -408,6 +448,26 @@ def _verify_webshare_email(email, timeout=15):
         return False
 
 
+def _browser_exe(headless=True):
+    """Absolute browser executable (bundled chromium first). None = fail fast."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("thtui", str(BASE / "th-tui.py"))
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        exe = m.resolve_browser_executable(headless=headless)
+        if exe:
+            return exe
+    except Exception as _e:
+        print(f"[swallow th-webshare.py:browser] {_e}")
+    import shutil
+    for name in ("google-chrome", "google-chrome-stable", "chromium-browser", "chromium"):
+        w = shutil.which(name)
+        if w:
+            return w
+    return None
+
+
 def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="2captcha", email=None, auto_mode=False):
     """auto_mode=True: headed browser but NEVER wait for a human — solver/retry/rotate only."""
     """Create one Webshare account, return (email, proxies_saved_count) or None.
@@ -421,21 +481,34 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
-        # Host-resolver rule must EXCLUDE the proxy host, else Chromium can't resolve
-        # the proxy itself over http/https (socks5 bridge on 127.0.0.1 is an IP literal,
-        # unaffected by DNS rules).
-        _hrr = "MAP * ~NOTFOUND"
+        # Browser binary: absolute path only (bare "google-chrome" never resolves).
+        browser_exe = _browser_exe(headless=not vnc_mode)
+        if not browser_exe:
+            log("no usable browser executable — refusing to burn proxies/emails", "warn")
+            return ("BLOCKED", None)
+        # Host-resolver rules ONLY for IP-literal proxy hosts: with
+        # MAP * ~NOTFOUND Chromium cannot resolve a proxy HOSTNAME and every
+        # tunnel fails. Hostname proxies use system DNS instead.
+        launch_args = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+                       "--disable-ipv6",
+                       "--disable-features=UseDnsHttpsSvcbAlpn",
+                       "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+                       "--disable-rtc-smoothness-algorithm"]
         if proxy_parsed and proxy_parsed[1]:
-            _hrr += ", EXCLUDE " + proxy_parsed[1]
-        launch_kwargs = {"executable_path": "/usr/bin/chromium-browser",
+            import ipaddress as _ipa
+            try:
+                _ipa.ip_address(proxy_parsed[1])
+                launch_args.append("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE " + proxy_parsed[1])
+            except Exception:
+                pass
+        launch_kwargs = {"executable_path": browser_exe,
                          "headless": not vnc_mode,
-                         "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-                                  "--host-resolver-rules=" + _hrr,
-                                  "--disable-ipv6",
-                                  "--disable-features=UseDnsHttpsSvcbAlpn",
-                                  "--webrtc-ip-handling-policy=disable_non_proxied_udp",
-                                  "--disable-rtc-smoothness-algorithm"]}
-        b = p.chromium.launch(**launch_kwargs)
+                         "args": launch_args}
+        try:
+            b = p.chromium.launch(**launch_kwargs)
+        except Exception as le:
+            log(f"browser launch failed (not proxy): {str(le)[:100]}", "warn")
+            return ("BLOCKED", None)
         ctx_kwargs = {"viewport": {"width": 1280, "height": 720}}
         if proxy_parsed:
             import importlib.util
@@ -633,8 +706,9 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                 print(f"[swallow th-webshare.py:611] {_e}")
                 pass
 
-            # SOLVE CAPTCHA
+            # SOLVE CAPTCHA — per-account budget starts at first solver attempt
             token = None
+            solve_t0 = time.monotonic()
             # Enterprise often PASSES silently (no widget at all) based on risk score.
             # Poll for an already-present token BEFORE trying any solver.
             for _w in range(10):
@@ -647,7 +721,8 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                     log("Captcha auto-passed (invisible Enterprise) — token ready", "ok")
                     token = t0
                     break
-                time.sleep(1)
+                if _wsleep(1):
+                    break
             # auto-solve with audio solver first (free — no API key needed)
             if not token:
                 # Only try the solver IF a reCAPTCHA iframe is actually present.
@@ -667,7 +742,7 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                 else:
                     log("Trying audio solver...", "info")
                     try:
-                        if _solve_recaptcha_audio(pg):
+                        if _solve_recaptcha_audio(pg, t0=solve_t0):
                             t = pg.evaluate("() => (window.grecaptcha && grecaptcha.getResponse()) || ''")
                             if t:
                                 token = t
@@ -678,6 +753,7 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                 # --vnc-auto: VNC stays up as a WITNESS, but nobody will solve.
                 # Rotate proxy immediately instead of blocking on a human.
                 log("Audio solver failed (--vnc-auto) — rotating proxy instead of waiting", "warn")
+                _close_browser(b)
                 return ("BLOCKED", None)
             if not token and vnc_mode:
                 log("Audio solver didn't work — waiting for manual solve in VNC...", "warn")
@@ -685,6 +761,12 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                 import select
                 import termios as _term, tty as _tty
                 for _ in range(300):  # up to 10 min, but detects block early
+                    if STOP.is_set():
+                        log("Solve aborted (interrupted) — abandoning account", "warn")
+                        break
+                    if _solve_expired(solve_t0):
+                        log(f"Solve budget {int(_solve_budget_s())}s exceeded — abandoning {email}", "warn")
+                        break
                     # manual skip keybind: Q -> rotate proxy for this account
                     try:
                         if select.select([sys.stdin], [], [], 0)[0]:
@@ -752,22 +834,28 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                     except Exception as _e:
                         print(f"[swallow th-webshare.py:720] {_e}")
                         pass
-                    time.sleep(2)
+                    if _wsleep(2):
+                        log("Solve aborted (interrupted) — abandoning account", "warn")
+                        break
             elif captcha_key:
-                token = _solve_paid(captcha_key, captcha_provider)
+                token = _solve_paid(captcha_key, captcha_provider, solve_t0)
             if not token:
-                # second chance after paid/manual paths skipped
-                log("Retrying audio solver...", "info")
-                try:
-                    if _solve_recaptcha_audio(pg):
-                        t = pg.evaluate("() => (window.grecaptcha && grecaptcha.getResponse()) || ''")
-                        if t:
-                            token = t
-                except Exception as _e:
-                    print(f"[swallow th-webshare.py:733] {_e}")
-                    pass
+                if STOP.is_set() or _solve_expired(solve_t0):
+                    log(f"Solve budget {int(_solve_budget_s())}s exceeded — skipping second-chance retry for {email}", "warn")
+                else:
+                    # second chance after paid/manual paths skipped
+                    log("Retrying audio solver...", "info")
+                    try:
+                        if _solve_recaptcha_audio(pg, t0=solve_t0):
+                            t = pg.evaluate("() => (window.grecaptcha && grecaptcha.getResponse()) || ''")
+                            if t:
+                                token = t
+                    except Exception as _e:
+                        print(f"[swallow th-webshare.py:733] {_e}")
+                        pass
             if not token:
                 log("Captcha not solved — account abandoned")
+                _close_browser(b)
                 return None
 
             log("Captcha solved — submitting...")
@@ -811,6 +899,7 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                     low = body.lower()
                     if resp.status_code == 400 and ("suspicious email" in low or "cannot sign up" in low):
                         log(f"Email flagged suspicious by webshare: {email}", "warn")
+                        _close_browser(b)
                         return ("SUSPICIOUS", None)
                     if resp.status_code == 429 or ("throttl" in low):
                         # extract wait seconds
@@ -818,16 +907,20 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
                         m = _re.search(r"(\d+)", low)
                         wait = int(m.group(1)) if m else 60
                         log(f"Webshare throttled — need to wait {wait}s", "warn")
+                        _close_browser(b)
                         return ("THROTTLED", wait)
+                    _close_browser(b)
                     return None
             if not at:
                 log("No token obtained")
+                _close_browser(b)
                 return None
             # fetch proxies
             r2 = sess.get(f"{API_BASE}/proxy/list/", headers={"Authorization": f"Token {at}"},
                           params={"mode": "direct", "page": 1, "page_size": 100}, timeout=15)
             if r2.status_code != 200:
                 log(f"Proxy fetch: {r2.status_code}")
+                _close_browser(b)
                 return None
             results = r2.json().get("results", [])
             added = save_proxies(results)
@@ -861,7 +954,7 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
             return None
 
 
-def _solve_recaptcha_audio(pg, max_attempts=4):
+def _solve_recaptcha_audio(pg, max_attempts=4, t0=None):
     """Solve reCAPTCHA v2 via the audio challenge, fully logged.
 
     Frame map (reCAPTCHA v2):
@@ -877,6 +970,9 @@ def _solve_recaptcha_audio(pg, max_attempts=4):
         log(f"Audio solver unavailable: {str(e)[:80]}", "warn")
         return False
 
+    if t0 is None:
+        t0 = time.monotonic()
+
     def _frames():
         # Webshare uses reCAPTCHA ENTERPRISE: /recaptcha/enterprise/anchor|bframe
         # Classic v2 uses /recaptcha/api2/anchor|bframe. Match both.
@@ -890,6 +986,9 @@ def _solve_recaptcha_audio(pg, max_attempts=4):
         return anchor, bf
 
     for attempt in range(1, max_attempts + 1):
+        if STOP.is_set() or _solve_expired(t0):
+            log(f"Audio solve: budget {int(_solve_budget_s())}s exceeded/interrupted — giving up", "warn")
+            return False
         try:
             # iframes are injected async by recaptcha/api.js — poll up to ~8s
             anchor = bf = None
@@ -897,14 +996,16 @@ def _solve_recaptcha_audio(pg, max_attempts=4):
                 anchor, bf = _frames()
                 if anchor:
                     break
-                time.sleep(0.5)
+                if _wsleep(0.5):
+                    return False
             if not anchor:
                 # captcha JS can take 20s+ to render through a slow proxy —
                 # keep waiting within THIS attempt before giving the slot up
                 log(f"Audio solve {attempt}/{max_attempts}: captcha iframe not up yet "
                     "(slow proxy render) — extending wait", "info")
                 for _x in range(24):  # +24s beyond the initial 8s poll
-                    time.sleep(1)
+                    if _wsleep(1):
+                        return False
                     anchor, bf = _frames()
                     if anchor:
                         break
@@ -933,7 +1034,8 @@ def _solve_recaptcha_audio(pg, max_attempts=4):
                 anchor, bf = _frames()
                 if bf:
                     break
-                time.sleep(0.5)
+                if _wsleep(0.5):
+                    return False
             if not bf:
                 log(f"Audio solve {attempt}: no challenge frame appeared after click "
                     "(waited 8s)", "info")
@@ -1058,8 +1160,10 @@ def _solve_recaptcha_audio(pg, max_attempts=4):
     return False
 
 
-def _solve_paid(api_key, provider):
+def _solve_paid(api_key, provider, t0=None):
     """Paid captcha solve (2captcha/azcaptcha). Returns token or None."""
+    if t0 is None:
+        t0 = time.monotonic()
     if provider == "2captcha":
         submit = "https://2captcha.com/in.php"
         result = "https://2captcha.com/res.php"
@@ -1076,7 +1180,12 @@ def _solve_paid(api_key, provider):
             return None
         cid = j["request"]
         for _ in range(60):
-            time.sleep(5)
+            if STOP.is_set() or _solve_expired(t0):
+                log(f"Paid solve: budget {int(_solve_budget_s())}s exceeded/interrupted — giving up", "warn")
+                return None
+            if _wsleep(5):
+                log("Paid solve aborted (interrupted) — giving up", "warn")
+                return None
             r2 = requests.get(result, params={"key": api_key, "action": "get",
                                               "id": cid, "json": 1}, timeout=15)
             j2 = r2.json()
@@ -1588,6 +1697,7 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
+        STOP.set()
         print("\nInterrupted")
         # tear down VNC stack we started (leave other tooling alone)
         import subprocess as _sp
