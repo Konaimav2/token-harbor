@@ -1953,7 +1953,8 @@ def _next_proxy(c, last=None):
     else:  # top
         cands = list(proxies)
     _rl_now = _load_ratelimited()
-    for p in cands[:min(30, len(cands))]:
+    checked = 0
+    for p in cands:
         # relay proxies (https://*.vercel.app) can't be Playwright socket proxies — skip for browser use
         if p[0] == "relay":
             continue
@@ -1964,6 +1965,9 @@ def _next_proxy(c, last=None):
         if _is_ratelimited(_proxy_id(p)):
             dlog(f"skip ratelimited proxy: {_proxy_id(p)}")
             continue
+        if checked >= 30:
+            break  # bound liveness checks per pick; skips above are free
+        checked += 1
         try:
             # use cached check result (from proxy-menu C=Check) when fresh —
             # overrides the auto live-check on every use
