@@ -1934,7 +1934,9 @@ def _next_proxy(c, last=None):
     used_ips = set(c.get("_used_proxy_ips", []))
     if order == "least":
         # skip cooldown proxies here too (smart_pick has no cooldown check)
-        fresh = [p for p in proxies if not _is_ratelimited(_proxy_id(p))]
+        skip_hosts = set(c.get("_skip_th_hosts", []))
+        fresh = [p for p in proxies if not _is_ratelimited(_proxy_id(p))
+                 and p[1] not in skip_hosts]
         if not fresh:
             dlog("all proxies on rate-limit cooldown for least-order pick")
             return None
@@ -1954,6 +1956,9 @@ def _next_proxy(c, last=None):
     for p in cands[:min(30, len(cands))]:
         # relay proxies (https://*.vercel.app) can't be Playwright socket proxies — skip for browser use
         if p[0] == "relay":
+            continue
+        # target-blocked hosts for tokenharbor.ai (measured, not failures)
+        if p[1] in c.get("_skip_th_hosts", []):
             continue
         # skip proxies on 1h rate-limit cooldown
         if _is_ratelimited(_proxy_id(p)):
@@ -2276,13 +2281,27 @@ def create_account(c, email=None, password=None, _retry=True):
         c["_local_fatal"] = "no usable browser executable"
         return None
     # proxy handling — rotate on flag; NEVER run proxyless when proxy required
+    # TARGET-AWARE SKIP: some proxy networks can't reach tokenharbor.ai at
+    # all (Flamingo residential exits get instant TCP RST on tokenharbor.ai
+    # while the same tunnel works for google — measured). Skip them here
+    # instead of burning attempts on a wall.
+    SKIP_HOSTS_FOR_TH = ("flamingoproxies.com",)
     pm = _load_proxy_mod()
     pcfg = c.get("proxy", {})
     proxy_parsed = None
     proxy_required = bool(pcfg.get("enabled") and pm and pcfg.get("mode") in ("list", "combo", "vpngate"))
     if pcfg.get("enabled") and pm:
         if pcfg.get("mode") in ("list", "combo"):
-            proxy_parsed = _next_proxy(c)
+            for _ in range(10):
+                cand = _next_proxy(c)
+                if not cand:
+                    break
+                if cand[1].endswith(SKIP_HOSTS_FOR_TH):
+                    dlog(f"Skipping {cand[1]} for tokenharbor.ai (measured target block, not a proxy failure)")
+                    c.setdefault("_skip_th_hosts", []).append(cand[1])
+                    continue
+                proxy_parsed = cand
+                break
             if proxy_parsed:
                 dlog(f"Using proxy: {pm.proxy_url(proxy_parsed, hide_password=True)} for {email}")
         elif pcfg.get("mode") == "vpngate":
