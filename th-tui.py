@@ -18,7 +18,7 @@ import threading
 import socket
 import hashlib
 
-TUI_BUILD = "proxyfast-v12-final-20260826"
+TUI_BUILD = "proxyfast-v13-20260913"
 
 # ── responsive terminal/layout helpers ──
 MIN_TERM_COLS = 40
@@ -2573,18 +2573,16 @@ def create_account(c, email=None, password=None, _retry=True):
             ]
             _reg_hit = [p for p in _reg_phrases if p in body]
             _api = _api_errors[-1] if _api_errors else 'none'
-            if _reg_hit and (not has_form or _api != 'none'):
-                log(f"Email already registered: {email} | api={_api} | page={body[:500]}", "warn")
+            # Specific phrases are a TRUE registration signal even with the
+            # form still rendered + api=none (verified live: stylushtrend512,
+            # awasmeledag both exist despite form+api=none). Terminal is
+            # correct; key recovery is a separate flow (reverify/oauth).
+            if _reg_hit:
+                log(f"Email already registered { _reg_hit}: {email} | api={_api} | page={body[:500]}", "warn")
                 b.close()
                 mark_used(email)  # never pick this address again
                 c["_email_terminal"] = True  # stop retrying this email
                 return None
-            if _reg_hit:
-                # registered-phrase seen BUT the signup form is still present and
-                # the backend reported nothing: the submit most likely stalled
-                # (not a confirmed duplicate). Do NOT mark used/terminal —
-                # fall through to the stall/retry handling below.
-                log(f"{email}: registered-phrase {_reg_hit} but form still present + api=none — treating as stall, NOT terminal", "warn")
             _blocked_phrases = [
                 "couldn't create your account", "couldn't create your account right now",
                 "can't create your account", "try again in a minute",
@@ -5061,17 +5059,19 @@ def main():
         sys.exit(1)
     load_cfg()
     try:
+        import time as _t
+        log(f"TH-TUI build {TUI_BUILD} (restart after updates — old sessions run stale code)", "info")
         raw_start()          # cbreak mode with ISIG kept (Ctrl+C still SIGINT)
         enter_fullscreen()   # tmux/vim-style full control until exit
         while True:
             require_terminal(MIN_TERM_COLS, 15, "Main Menu")
             cls()
             w = box_w()
-            banner = "TH-TUI  Token Harbor Account Creator · v12"
+            banner = f"TH-TUI  Token Harbor Account Creator · {TUI_BUILD}"
             if w < 42:
                 banner = "TH-TUI"
             elif w < len(banner) + 4:
-                banner = "TH-TUI  TH Acc. Creator · v12"
+                banner = f"TH-TUI  TH Acc. Creator · {TUI_BUILD}"
             print(box_top(w))
             print(box_title(w, banner))
             print(box_mid(w))
