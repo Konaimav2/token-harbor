@@ -1877,6 +1877,74 @@ def _is_ratelimited(proxy_id):
     return proxy_id in _load_ratelimited()
 
 
+def _load_egress_mod():
+    """Lazy-import egress so the TUI works even if it's missing."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("egress", str(BASE / "egress.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception as e:
+        elog("egress module load: " + str(e))
+        return None
+
+
+def _next_egress_proxy(c):
+    """Pick a machine egress IP (localhost micro-proxy per IPv4).
+
+    Cooldown/used-IP tracking reuse the normal machinery, keyed on the
+    127.0.0.1:PORT entry; c["_last_proxy_ip"] is set to the real EGRESS IP
+    so logs, rate-limit marks and hard-reject counting see the true identity.
+    """
+    em = _load_egress_mod()
+    if not em:
+        return None
+    try:
+        entries = em.ensure_egress_proxies()
+    except Exception as e:
+        elog("egress ensure: " + str(e))
+        return None
+    if not entries:
+        log("No machine egress IPs detected", "warn")
+        return None
+    cfg = c.get("proxy", {})
+    order = cfg.get("proxy_order", "top")
+    used_ips = set(c.get("_used_proxy_ips", []))
+    cands = [e for e in entries if e["ip"] not in used_ips]
+    if order == "random":
+        random.shuffle(cands)
+    else:
+        idx = int(c.get("_egress_idx", 0)) % max(1, len(cands))
+        cands = cands[idx:] + cands[:idx]
+        c["_egress_idx"] = idx + 1
+    for e in cands:
+        try:
+            port = int(e["proxy"].rsplit(":", 1)[1])
+        except Exception:
+            continue
+        parsed = ("http", "127.0.0.1", port, "", "")
+        if _is_ratelimited(_proxy_id(parsed)):
+            dlog(f"skip ratelimited egress: {e['ip']}")
+            continue
+        # verify mapping live: exit IP must equal the bound source IP
+        try:
+            import requests as _rq
+            r = _rq.get("https://api.ipify.org",
+                        proxies={"http": e["proxy"], "https": e["proxy"]}, timeout=8)
+            if (r.text or "").strip() != e["ip"]:
+                dlog(f"egress {e['ip']} mismatch (got {(r.text or '').strip()[:20]})")
+                continue
+        except Exception as _e:
+            dlog(f"egress {e['ip']} check: {str(_e)[:60]}")
+            continue
+        c["_last_proxy_ip"] = e["ip"]
+        log(f"Using egress IP: {e['ip']} (127.0.0.1:{port}, order={order})", "info")
+        return parsed
+    log("No live egress IP available", "warn")
+    return None
+
+
 def _next_proxy(c, last=None):
     """Get the next proxy for an account based on proxy config (smart balanced)."""
     pm = _load_proxy_mod()
@@ -1909,6 +1977,8 @@ def _next_proxy(c, last=None):
     if mode == "vpngate":
         p = pm.vpngate_proxy()
         return p
+    if mode == "egress":
+        return _next_egress_proxy(c)
     # MANUAL OVERRIDE: if proxy.current is set (user locked a proxy), use it
     # directly WITHOUT the auto liveness check — manual wins over checked status.
     manual = cfg.get("current")
@@ -4537,7 +4607,7 @@ def menu_proxy(c):
         pcfg = c.get("proxy", {})
         status = f"{G}● ON{RS}" if pcfg.get("enabled") else f"{DI}○ OFF{RS}"
         mode = pcfg.get("mode", "list")
-        mode_lbl = {"list": "List", "vpngate": "VPNGate", "combo": "Combo (local+list)"}.get(mode, mode)
+        mode_lbl = {"list": "List", "vpngate": "VPNGate", "combo": "Combo (local+list)", "egress": "Egress (machine IPs)"}.get(mode, mode)
         order_lbl = {"top": "Top", "random": "Random", "least": "Least Used", "fastest": "Fastest"}.get(pcfg.get("proxy_order", "top"), "Top")
         tmp = "yes" if pcfg.get("use_public_tempmail") else "no"
         no_del = "ON" if pcfg.get("no_delete") else "OFF"
@@ -4594,6 +4664,7 @@ def menu_proxy(c):
                 ("list", "Proxy list", "use proxies from proxy.txt"),
                 ("combo", "Combo", "local proxy-controller, else list"),
                 ("vpngate", "VPNGate", "free residential IPs via vpngate.net"),
+                ("egress", "Egress IPs", "machine IPv4s via localhost (zero cost)"),
             ])
             if sel:
                 pcfg["mode"] = sel[0]
