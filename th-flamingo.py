@@ -51,9 +51,19 @@ STEALTH_JS = """() => {
 def _launch_browser(p, exe, headless, proxy_host=""):
     """Real Google Chrome first (better v3 score than Chromium-for-Testing),
     bundled chromium fallback. Returns browser."""
+    import ipaddress as _ipa
+    _ip_literal = False
+    if proxy_host:
+        try:
+            _ipa.ip_address(proxy_host)
+            _ip_literal = True
+        except Exception:
+            pass
     base_args = ["--no-sandbox", "--disable-dev-shm-usage",
                  "--disable-blink-features=AutomationControlled"]
-    if proxy_host:
+    # HRR only for IP-literal proxy hosts: with MAP * ~NOTFOUND Chromium
+    # cannot resolve a proxy HOSTNAME and every tunnel fails.
+    if proxy_host and _ip_literal:
         base_args.append("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE " + proxy_host)
     else:
         base_args.append("--disable-ipv6")
@@ -1308,6 +1318,417 @@ def claim_50mb(pg):
     return _vconfirm(pg, "points shop showing the 50MB plan redeemed or a success confirmation")
 
 
+def _combo_controls(pg, scope):
+    """Map type-and-select dropdowns: [{idx, label}] for text inputs, combobox
+    roles and contenteditables, labelled by nearest label text. DOM order."""
+    try:
+        return pg.evaluate("""(root) => {
+            const scopeEl = root || document;
+            const ctrls = [...scopeEl.querySelectorAll(
+                'input[role="combobox"], input[aria-expanded], [role="combobox"], ' +
+                '[contenteditable="true"], input[type="text"]:not([name="csrf_token"])')];
+            return ctrls.filter(el => {
+                const r = el.getBoundingClientRect(); return r.width > 40 && r.height > 10;
+            }).slice(0, 12).map((el, idx) => {
+                let label = el.getAttribute('aria-label') || el.getAttribute('placeholder') || '';
+                if (!label) {
+                    let n = el, depth = 0;
+                    while (n && depth < 5) {
+                        n = n.parentElement; depth++;
+                        const lab = n ? n.querySelector('label') : null;
+                        if (lab && lab.innerText.trim()) { label = lab.innerText.trim(); break; }
+                    }
+                }
+                if (!label && el.id) {
+                    const lab = document.querySelector(`label[for="${el.id}"]`);
+                    if (lab) label = lab.innerText.trim();
+                }
+                return {idx, label: (label || '').slice(0, 60)};
+            });
+        }""", scope)
+    except Exception:
+        return []
+
+
+def ensure_generator_visible(pg, tries=3):
+    """Open the Residential Proxy Generator (product page). Returns True."""
+    for _ in range(tries):
+        try:
+            body = (pg.inner_text("body", timeout=8000) or "")
+            if "Residential Proxy Generator" in body:
+                return True
+            loc = pg.locator("text=Standard Residential").first
+            if loc.count():
+                loc.click(timeout=10000)
+                pg.wait_for_timeout(6000)
+        except Exception:
+            pass
+    try:
+        body = (pg.inner_text("body", timeout=8000) or "")
+        return "Residential Proxy Generator" in body
+    except Exception:
+        return False
+
+
+def _labeled_control(pg, scope, label):
+    """Find the form control under an exact label text. Returns dict
+    {kind: 'select'|'box', index} or None. scope limits the search."""
+    try:
+        return pg.evaluate("""([label]) => {
+            const labs = [...document.querySelectorAll('label, div, span, p')]
+                .filter(e => (e.innerText || '').trim() === label
+                    && e.children.length === 0);
+            for (const lab of labs) {
+                let root = lab.parentElement;
+                for (let d = 0; d < 4 && root; d++) {
+                    const sel = root.querySelector('select');
+                    if (sel) {
+                        const all = [...document.querySelectorAll('select')];
+                        return {kind: 'select', index: all.indexOf(sel)};
+                    }
+                    const box = [...root.querySelectorAll('div')]
+                        .find(e => /^(Random|.+)$/.test((e.innerText || '').trim())
+                            && e.getBoundingClientRect().height > 20
+                            && e.getBoundingClientRect().height < 70
+                            && e.children.length <= 2);
+                    if (box) {
+                        const all = [...document.querySelectorAll('div')]
+                            .filter(e => { const r = e.getBoundingClientRect();
+                                return r.height > 20 && r.height < 70; });
+                        return {kind: 'box', index: all.indexOf(box)};
+                    }
+                    root = root.parentElement;
+                }
+            }
+            return null;
+        }""", [label])
+    except Exception:
+        return None
+
+
+def _pick_from_control(pg, scope, label, want_text=None):
+    """Select want_text (or random option) in the control under label.
+    Returns (value, text)."""
+    info = _labeled_control(pg, scope, label)
+    if not info:
+        return None, ""
+    if info["kind"] == "select":
+        try:
+            sel = pg.locator("select").nth(info["index"])
+            opts = sel.locator("option")
+            texts = [opts.nth(j).inner_text(timeout=1500).strip() for j in range(opts.count())]
+            if want_text:
+                hit = next((t for t in texts if want_text.lower() in t.lower()), "")
+                if not hit:
+                    return None, ""
+            else:
+                pool = [t for t in texts if t and "select" not in t.lower()
+                        and "choose" not in t.lower() and "random" not in t.lower()]
+                if not pool:
+                    return None, ""
+                hit = random.choice(pool)
+            val = sel.locator("option", has_text=hit).first.get_attribute("value")
+            sel.select_option(value=val)
+            pg.wait_for_timeout(2500)
+            return val, hit
+        except Exception:
+            return None, ""
+    # custom div dropdown: click box, then the option
+    try:
+        boxes = pg.locator("div").all()
+        box = boxes[info["index"]]
+        box.click(timeout=6000)
+        pg.wait_for_timeout(1500)
+        opts = pg.locator("[role='option'], ul li, .dropdown-item, .option")
+        texts = []
+        for j in range(min(opts.count(), 80)):
+            try:
+                t = opts.nth(j).inner_text(timeout=1000).strip()
+                if t:
+                    texts.append((j, t))
+            except Exception:
+                pass
+        if want_text:
+            hit = next(((j, t) for j, t in texts if want_text.lower() in t.lower()), None)
+        else:
+            pool = [(j, t) for j, t in texts if "select" not in t.lower()
+                    and "choose" not in t.lower() and "random" not in t.lower()]
+            hit = random.choice(pool) if pool else None
+        if hit is None:
+            try:
+                pg.keyboard.press("Escape")
+            except Exception:
+                pass
+            return None, ""
+        j, t = hit
+        try:
+            opts.nth(j).click(timeout=6000)
+        except Exception:
+            pg.evaluate("""(t) => { const items=[...document.querySelectorAll(
+                '[role="option"], ul li, .dropdown-item, .option')];
+                const el=items.find(x=>(x.innerText||'').includes(t)); if(el) el.click(); }""", t[:30])
+        pg.wait_for_timeout(2000)
+        return t, t
+    except Exception:
+        return None, ""
+
+
+def _pick_from_control(pg, scope, label, want_text=None):
+    """Select want_text (or random) in the control under exact `label`.
+    Handles native <select> and custom click-to-open div dropdowns.
+    Returns (value, text)."""
+    # 1. native select under the label
+    try:
+        info = pg.evaluate("""([label]) => {
+            const labs = [...document.querySelectorAll('label')]
+                .filter(e => (e.innerText || '').trim() === label);
+            for (const lab of labs) {
+                let root = lab.parentElement;
+                for (let d = 0; d < 4 && root; d++) {
+                    const sel = root.querySelector('select');
+                    if (sel) {
+                        const all = [...document.querySelectorAll('select')];
+                        return {kind: 'select', index: all.indexOf(sel)};
+                    }
+                    root = root.parentElement;
+                }
+            }
+            return null;
+        }""", [label])
+    except Exception:
+        info = None
+    if info and info.get("kind") == "select" and info.get("index", -1) >= 0:
+        try:
+            sel = pg.locator("select").nth(info["index"])
+            opts = sel.locator("option")
+            texts = [opts.nth(j).inner_text(timeout=1500).strip() for j in range(opts.count())]
+            if want_text:
+                hit = next((t for t in texts if want_text.lower() in t.lower()), "")
+                if not hit:
+                    return None, ""
+            else:
+                pool = [t for t in texts if t and "select" not in t.lower()
+                        and "choose" not in t.lower() and "random" not in t.lower()]
+                if not pool:
+                    return None, ""
+                hit = random.choice(pool)
+            val = sel.locator("option", has_text=hit).first.get_attribute("value")
+            sel.select_option(value=val)
+            pg.wait_for_timeout(2500)
+            return val, hit
+        except Exception:
+            pass
+    # 2. custom div dropdown: click the value box under the label, then option
+    try:
+        box_idx = pg.evaluate("""([label]) => {
+            const labs = [...document.querySelectorAll('label, div, span, p')]
+                .filter(e => (e.innerText || '').trim() === label && e.children.length === 0);
+            for (const lab of labs) {
+                let root = lab.parentElement;
+                for (let d = 0; d < 5 && root; d++) {
+                    const boxes = [...root.querySelectorAll('div')].filter(e => {
+                        const r = e.getBoundingClientRect();
+                        const t = (e.innerText || '').trim();
+                        return r.height > 20 && r.height < 70 && t.length > 0 && t.length < 60;
+                    });
+                    if (boxes.length) {
+                        const all = [...document.querySelectorAll('div')];
+                        return all.indexOf(boxes[0]);
+                    }
+                    root = root.parentElement;
+                }
+            }
+            return -1;
+        }""", [label])
+        if box_idx is None or box_idx < 0:
+            return None, ""
+        pg.locator("div").nth(box_idx).click(timeout=6000)
+        pg.wait_for_timeout(1500)
+        opts = pg.locator("[role='option'], ul li, .dropdown-item, .option")
+        texts = []
+        for j in range(min(opts.count(), 100)):
+            try:
+                t = opts.nth(j).inner_text(timeout=1000).strip()
+                if t:
+                    texts.append((j, t))
+            except Exception:
+                pass
+        if want_text:
+            hit = next(((j, t) for j, t in texts if want_text.lower() in t.lower()), None)
+        else:
+            pool = [(j, t) for j, t in texts if "select" not in t.lower()
+                    and "choose" not in t.lower() and "random" not in t.lower()]
+            hit = random.choice(pool) if pool else None
+        if hit is None:
+            try:
+                pg.keyboard.press("Escape")
+            except Exception:
+                pass
+            return None, ""
+        j, t = hit
+        try:
+            opts.nth(j).click(timeout=6000)
+        except Exception:
+            pg.evaluate("""(t) => { const items=[...document.querySelectorAll(
+                '[role="option"], ul li, .dropdown-item, .option')];
+                const el=items.find(x=>(x.innerText||'').includes(t)); if(el) el.click(); }""", t[:30])
+        pg.wait_for_timeout(2000)
+        return t, t
+    except Exception:
+        return None, ""
+
+
+def _dropdown_pick(pg, scope, label_re, want_text=None):
+    """Pick an option from a labelled dropdown (native <select> OR custom
+    click-to-open div). want_text=None picks a random non-placeholder option.
+    Returns (value, text)."""
+    # 1. native select first
+    try:
+        sels = scope.locator("select")
+        for i in range(sels.count()):
+            try:
+                lab = ""
+                try:
+                    lab = sels.nth(i).evaluate(
+                        """(el) => { const l = el.closest('div')?.parentElement?.querySelector('label')?.innerText
+                            || el.getAttribute('aria-label') || el.getAttribute('name') || ''; return l; }""")
+                except Exception:
+                    pass
+                opts = sels.nth(i).locator("option")
+                texts = [opts.nth(j).inner_text(timeout=1500).strip() for j in range(opts.count())]
+                if label_re and not re.search(label_re, lab or " ".join(texts[:3]), re.I):
+                    continue
+                pool = [(opts.nth(j).get_attribute("value"), t) for j, t in enumerate(texts)
+                        if t and "select" not in t.lower() and "choose" not in t.lower() and "random" not in t.lower()]
+                if want_text:
+                    hit = next(((v, t) for v, t in pool if want_text.lower() in t.lower()), None)
+                    if hit:
+                        sels.nth(i).select_option(value=hit[0])
+                        return hit
+                elif pool:
+                    v, t = random.choice(pool)
+                    sels.nth(i).select_option(value=v)
+                    return v, t
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # 2. custom div dropdown: click the box showing current value, then the option
+    try:
+        boxes = scope.locator("div:has-text('Random')")
+        for i in range(min(boxes.count(), 8)):
+            try:
+                box = boxes.nth(i)
+                # nearest label above the box
+                lab = box.evaluate("""(el) => { let n = el.parentElement;
+                    for (let d = 0; d < 4 && n; d++, n = n.parentElement) {
+                        const m = (n.innerText || '').split('\\n').map(s => s.trim()).filter(Boolean);
+                        if (m.length) return m[0];
+                    } return ''; }""")
+                if label_re and not re.search(label_re, lab, re.I):
+                    continue
+                box.click(timeout=6000)
+                pg.wait_for_timeout(1500)
+                opts = pg.locator("[role='option'], ul li, .dropdown-item, .option")
+                texts = []
+                for j in range(min(opts.count(), 60)):
+                    try:
+                        t = opts.nth(j).inner_text(timeout=1000).strip()
+                        if t:
+                            texts.append((j, t))
+                    except Exception:
+                        pass
+                if want_text:
+                    hit = next(((j, t) for j, t in texts if want_text.lower() in t.lower()), None)
+                else:
+                    pool = [(j, t) for j, t in texts
+                            if "select" not in t.lower() and "choose" not in t.lower() and "random" not in t.lower()]
+                    hit = random.choice(pool) if pool else None
+                if hit is None:
+                    try:
+                        pg.keyboard.press("Escape")
+                    except Exception:
+                        pass
+                    continue
+                j, t = hit
+                try:
+                    opts.nth(j).click(timeout=6000)
+                except Exception:
+                    pg.evaluate("""(t) => { const items=[...document.querySelectorAll(
+                        '[role="option"], ul li, .dropdown-item, .option')];
+                        const el=items.find(x=>(x.innerText||'').includes(t)); if(el) el.click(); }""", t[:30])
+                pg.wait_for_timeout(2000)
+                return t, t  # custom dropdowns: display text doubles as value
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return None, ""
+
+
+def _combo_select(pg, scope, label_re, want_text=None):
+    """Type-and-select in a combobox labelled like label_re. want_text=None
+    picks a random non-placeholder option. Returns (value, text)."""
+    ctrls = _combo_controls(pg, scope)
+    target = next((c for c in ctrls if re.search(label_re, c.get("label", ""), re.I)), None)
+    if not target:
+        return None, ""
+    # resolve the element handle again inside the page for interaction
+    info = pg.evaluate("""([scopeSel, idx, want]) => {
+        const scopeEl = document;
+        const ctrls = [...scopeEl.querySelectorAll(
+            'input[role="combobox"], input[aria-expanded], [role="combobox"], ' +
+            '[contenteditable="true"], input[type="text"]:not([name="csrf_token"])')]
+            .filter(el => { const r = el.getBoundingClientRect(); return r.width > 40 && r.height > 10; });
+        const el = ctrls[idx];
+        if (!el) return {ok: false};
+        el.scrollIntoView({block: 'center'});
+        el.click();
+        el.focus();
+        return {ok: true};
+    }""", [None, target["idx"], want_text or ""])
+    if not info or not info.get("ok"):
+        return None, ""
+    pg.wait_for_timeout(1200)
+    if want_text:
+        try:
+            pg.keyboard.type(want_text, delay=60)
+            pg.wait_for_timeout(2000)
+        except Exception:
+            pass
+    opts = pg.evaluate("""(() => {
+        const items = [...document.querySelectorAll(
+            '[role="option"], [role="listbox"] [role="option"], ul li, .dropdown-item, .option')]
+            .filter(el => { const r = el.getBoundingClientRect();
+                return r.width > 20 && r.height > 8 && (el.innerText || '').trim(); });
+        return items.slice(0, 60).map(el => ({
+            text: (el.innerText || '').trim().slice(0, 60),
+            value: el.getAttribute('data-value') || el.getAttribute('value') || '' }));
+    })()""")
+    if not opts:
+        return None, ""
+    if want_text:
+        pick = next((o for o in opts if want_text.lower() in o["text"].lower()), None)
+    else:
+        pool = [o for o in opts if "select" not in o["text"].lower() and "choose" not in o["text"].lower()]
+        pick = random.choice(pool or opts)
+    if not pick:
+        return None, ""
+    try:
+        pg.locator(f"[role='option']:has-text('{pick['text'][:30]}')").first.click(timeout=6000)
+    except Exception:
+        try:
+            pg.evaluate("""(t) => {
+                const items = [...document.querySelectorAll('[role="option"], ul li, .dropdown-item, .option')];
+                const el = items.find(x => (x.innerText || '').includes(t));
+                if (el) el.click();
+            }""", pick["text"][:30])
+        except Exception:
+            return None, ""
+    pg.wait_for_timeout(2000)
+    return pick["value"] or pick["text"], pick["text"]
+
+
 def _select_option_by_names(pg, scope, names):
     """Pick first matching visible option text in a <select>. Returns (value, text)."""
     sels = scope.locator("select")
@@ -1326,6 +1747,20 @@ def _select_option_by_names(pg, scope, names):
     return None, ""
 
 
+def _js_select(pg, css, value, timeout=10000):
+    """Set a (possibly hidden/custom-overlay) <select> by value via JS +
+    change event. Returns the selected option text."""
+    return pg.evaluate("""([css, val]) => {
+        const sel = document.querySelector(css);
+        if (!sel) return '';
+        sel.value = val;
+        sel.dispatchEvent(new Event('input', {bubbles: true}));
+        sel.dispatchEvent(new Event('change', {bubbles: true}));
+        const opt = sel.querySelector(`option[value="${val}"]`);
+        return opt ? opt.textContent.trim() : '';
+    }""", [css, value])
+
+
 def configure_generator(pg, qty=5, sticky_min=2, sticky_max=5, countries=None):
     """Drive the Residential Proxy Generator form. Returns dict used for API call.
 
@@ -1335,29 +1770,15 @@ def configure_generator(pg, qty=5, sticky_min=2, sticky_max=5, countries=None):
     countries = countries or GEN_COUNTRIES
     goto_retry(pg, f"{DASH_BASE}/?tab=residential")
     pg.wait_for_timeout(5000)
-    # generator may live on the plan product page — open Standard card if needed
+    if not ensure_generator_visible(pg):
+        log("generator form never appeared", "warn")
+        return {"country": "_country-id", "state": "random", "city": "random",
+                "sticky": random.randint(sticky_min, sticky_max), "confirmed": False}
     try:
-        body = (pg.inner_text("body", timeout=8000) or "").lower()
+        pg.wait_for_selector("select#generate-country-select, select[name='generate-country-select']", state="attached", timeout=30000)
+        pg.wait_for_timeout(2000)
     except Exception:
-        body = ""
-    if "residential proxy generator" not in body:
-        for sel in ["text=Standard Residential", "text=Standard Resident"]:
-            try:
-                loc = pg.locator(sel).first
-                if loc.count():
-                    loc.click(timeout=10000)
-                    pg.wait_for_timeout(6000)
-                    break
-            except Exception:
-                pass
-    try:
-        body = (pg.inner_text("body", timeout=8000) or "").lower()
-    except Exception:
-        body = ""
-    if "residential proxy generator" not in body:
-        # vision fallback: find + click whatever opens the generator
-        _vision_locate_click(pg, "the Standard Residential plan card or button that opens proxy generation")
-        pg.wait_for_timeout(5000)
+        pass
     _vconfirm(pg, "Residential Proxy Generator form visible with plan, proxy type, country and quantity controls")
     gen = pg.locator("text=/Residential Proxy Generator/i").first
     scope = pg.locator("body")
@@ -1413,62 +1834,50 @@ def configure_generator(pg, qty=5, sticky_min=2, sticky_max=5, countries=None):
                 pass
     except Exception as e:
         log(f"sticky config: {str(e)[:60]}", "warn")
-    # 3. Country (+ value id) with random State/City
+    # 3. Country (+ value id) with random City.
+    # Real controls (stable names): generate-country-select,
+    # generate-city-select (ONE combined State/City dropdown).
     country_val, country_name, state_val, city_val = "_country-id", "any", "random", "random"
+    country_css = ("select#generate-country-select, select[name='generate-country-select']")
+    city_css = ("select#generate-city-select, select[name='generate-city-select']")
+    def _opt_list(css):
+        rows = pg.evaluate("""(css) => {
+            const sel = document.querySelector(css);
+            if (!sel) return [];
+            return [...sel.options].map(o => [(o.textContent || '').trim(), o.value]);
+        }""", [css]) or []
+        return [(str(v), str(t)) for t, v in rows]
     try:
-        sels = scope.locator("select")
-        geo = []
-        for i in range(sels.count()):
-            try:
-                opts = sels.nth(i).locator("option")
-                texts = [opts.nth(j).inner_text(timeout=1500).strip() for j in range(opts.count())]
-                geo.append((i, texts))
-            except Exception:
-                pass
-        # country select = the one containing a wanted country
-        for i, texts in geo:
-            for want in countries:
-                hit = next((t for t in texts if want.lower() in t.lower()), "")
-                if hit:
-                    val = scope.locator("select").nth(i).locator("option", has_text=hit).first.get_attribute("value")
-                    scope.locator("select").nth(i).select_option(value=val)
-                    pg.wait_for_timeout(3000)  # state/city options reload
-                    country_val, country_name = val, hit
-                    break
-            if country_val != "_country-id":
+        texts = _opt_list(country_css)
+        log(f"country options: {[t for _, t in texts][:30]}")
+        hit = ""
+        for want in countries:
+            hit = next(((v, t) for v, t in texts if want.lower() in t.lower()), ("", ""))
+            if hit[1]:
                 break
-        if country_val == "_country-id":
-            # keep placeholder-country default, still randomize the rest below
+        if hit[1]:
+            v, t = hit
+            shown = _js_select(pg, country_css, v)
+            pg.wait_for_timeout(3000)  # city options reload
+            country_val, country_name = v, shown or t
+            log(f"country: {country_name} (val={str(v)[:40]})")
+        else:
             log("wanted countries not listed — keeping default country")
-        # state/city = random non-placeholder option of the remaining selects
-        picked = 0
-        for i, _ in geo:
-            try:
-                sel = scope.locator("select").nth(i)
-                opts = sel.locator("option")
-                vals = []
-                for j in range(opts.count()):
-                    t = opts.nth(j).inner_text(timeout=1500).strip()
-                    v = opts.nth(j).get_attribute("value")
-                    if t and v and "select" not in t.lower() and "choose" not in t.lower() and v != country_val:
-                        vals.append((v, t))
-                if vals and picked < 2:
-                    v, t = random.choice(vals)
-                    # skip the country select itself
-                    cur = sel.input_value(timeout=2000)
-                    if cur == country_val:
-                        continue
-                    sel.select_option(value=v)
-                    if picked == 0:
-                        state_val = v
-                    else:
-                        city_val = v
-                    picked += 1
-                    pg.wait_for_timeout(1500)
-            except Exception:
-                pass
     except Exception as e:
-        log(f"geo config: {str(e)[:60]}", "warn")
+        log(f"country select: {str(e)[:60]}", "warn")
+    try:
+        texts = _opt_list(city_css)
+        pool = [(v, t) for v, t in texts
+                if t and v and "select" not in t.lower() and "choose" not in t.lower()
+                and "random" not in t.lower() and "all" not in t.lower()]
+        if pool:
+            v, t = random.choice(pool)
+            _js_select(pg, city_css, v)
+            city_val = v
+            log(f"city: {t}")
+            pg.wait_for_timeout(1500)
+    except Exception as e:
+        log(f"city select: {str(e)[:60]}", "warn")
     # 4. Qty
     try:
         qty_in = scope.locator("input[name*='qty' i], input[name*='quantity' i], input[name*='amount' i]").first
@@ -1484,7 +1893,8 @@ def configure_generator(pg, qty=5, sticky_min=2, sticky_max=5, countries=None):
             "sticky": sticky_val, "confirmed": ok}
 
 
-def generate_proxies_api(pg, plan=2, qty=5, sticky=10, country="_country-id"):
+def generate_proxies_api(pg, plan=2, qty=5, sticky=10, country="_country-id",
+                         state="random", city="random"):
     """Call the dashboard generate-proxies API in-page (session cookies apply).
     Returns list of dicts {host,port,user,pw}."""
     res = pg.evaluate("""async ([payload]) => {
@@ -1492,7 +1902,7 @@ def generate_proxies_api(pg, plan=2, qty=5, sticky=10, country="_country-id"):
             headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
             body: JSON.stringify(payload)});
         return await r.json();
-    }""", [{"country": country, "state": "random", "city": "random",
+    }""", [{"country": country, "state": state, "city": city,
              "proxy_plan": plan, "proxy_amount": qty, "proxy_type": "sticky",
              "format": "user:pass@ip:port", "ttl": sticky}])
     out = []
@@ -1545,7 +1955,8 @@ def _gen_logged_in(pg, pm, email, qty, sticky, country, plan):
     cfg = configure_generator(pg, qty=qty, sticky_min=2,
                               sticky_max=max(2, min(5, sticky)), countries=GEN_COUNTRIES)
     got = generate_proxies_api(pg, plan=plan, qty=qty, sticky=cfg.get("sticky", sticky),
-                               country=cfg.get("country", country))
+                               country=cfg.get("country", country),
+                               state=cfg.get("state", "random"), city=cfg.get("city", "random"))
     log(f"{email}: generated {len(got)} proxies")
     if not got:
         return 0
@@ -1591,7 +2002,12 @@ def gen_account(tui, email, password, proxy_parsed, qty, sticky, country, plan, 
             launch_args = ["--no-sandbox", "--disable-dev-shm-usage",
                            "--disable-blink-features=AutomationControlled"]
             if proxy_parsed and proxy_parsed[1]:
-                launch_args.append("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE " + proxy_parsed[1])
+                import ipaddress as _ipa2
+                try:
+                    _ipa2.ip_address(proxy_parsed[1])
+                    launch_args.append("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE " + proxy_parsed[1])
+                except Exception:
+                    launch_args.append("--disable-ipv6")
             try:
                 b = p.chromium.launch(channel="chrome", headless=not vnc_mode, args=launch_args)
             except Exception:
