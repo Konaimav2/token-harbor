@@ -2460,8 +2460,11 @@ def create_account(c, email=None, password=None, _retry=True):
                 _hz = None
             try:
                 if _hz:
-                    _hz.human_type(pg, pg.locator('input[name="email"]'), email)
-                    _hz.human_type(pg, pg.locator('input[name="password"]'), password)
+                    # mistakes=False: typo simulation is the long tail (TIMING
+                    # showed fill=11-40s); human pacing is kept, no bot check
+                    # on this page to justify the extra seconds.
+                    _hz.human_type(pg, pg.locator('input[name="email"]'), email, mistakes=False)
+                    _hz.human_type(pg, pg.locator('input[name="password"]'), password, mistakes=False)
                     _hz.rand_delay(0.4, 1.2)
                     _hz.human_click(pg, pg.locator('button[type="submit"]'))
                 else:
@@ -2568,7 +2571,7 @@ def create_account(c, email=None, password=None, _retry=True):
                 "has already been registered", "email already exists",
                 "this email is already", "already registered with", "email is already on",
             ]
-            _reg_hit = any(p in body for p in _reg_phrases)
+            _reg_hit = [p for p in _reg_phrases if p in body]
             _api = _api_errors[-1] if _api_errors else 'none'
             if _reg_hit and (not has_form or _api != 'none'):
                 log(f"Email already registered: {email} | api={_api} | page={body[:500]}", "warn")
@@ -2581,7 +2584,7 @@ def create_account(c, email=None, password=None, _retry=True):
                 # the backend reported nothing: the submit most likely stalled
                 # (not a confirmed duplicate). Do NOT mark used/terminal —
                 # fall through to the stall/retry handling below.
-                log(f"{email}: registered-phrase but form still present + api=none — treating as stall, NOT terminal", "warn")
+                log(f"{email}: registered-phrase {_reg_hit} but form still present + api=none — treating as stall, NOT terminal", "warn")
             _blocked_phrases = [
                 "couldn't create your account", "couldn't create your account right now",
                 "can't create your account", "try again in a minute",
