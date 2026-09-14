@@ -101,6 +101,33 @@ print(f"cookies {len(cookies)}  loggedmail {len(logged)}  already oauth {len(alr
 from playwright.sync_api import sync_playwright
 import subprocess as _sp, os, time
 
+_VNC_OWNED = []  # Popen handles WE started (kill by PID, never bare pkill)
+
+
+def _vnc_track(proc):
+    try:
+        _VNC_OWNED.append(proc)
+    except Exception:
+        pass
+    return proc
+
+
+def _vnc_cleanup():
+    for p in list(_VNC_OWNED):
+        try:
+            p.terminate()
+        except Exception:
+            pass
+    _VNC_OWNED.clear()
+
+
+try:
+    import atexit as _atexit
+    _atexit.register(_vnc_cleanup)
+except Exception:
+    pass
+
+
 def _ensure_vnc():
     # always set DISPLAY when VNC requested, regardless of WS_TH_NO_PROXY or other env
     if not VNC:
@@ -108,17 +135,22 @@ def _ensure_vnc():
     if not os.environ.get("DISPLAY"):
         os.environ["DISPLAY"]=":99"
     if _sp.call("pgrep -x Xvfb >/dev/null 2>&1", shell=True)!=0:
-        _sp.Popen(["Xvfb",":99","-screen","0","1280x900x24","-nolisten","tcp"], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        _vnc_track(_sp.Popen(["Xvfb",":99","-screen","0","1280x900x24","-nolisten","tcp"], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL))
         for _ in range(8):
             time.sleep(1)
             if _sp.call("DISPLAY=:99 xdpyinfo >/dev/null 2>&1", shell=True)==0: break
     if VNC and _sp.call("ss -ltn 2>/dev/null | grep -q :5900", shell=True)!=0:
         # start x11vnc+websockify if missing (same as th-tui stack)
         pwf=os.environ.get("VNC_PASSWORD","") or (lambda p: p.read_text().split("VNC_PASSWORD=")[1].split("\n")[0].strip().strip("'\"") if p.exists() and "VNC_PASSWORD" in p.read_text() else "")(BASE/".env") if (BASE/".env").exists() and "VNC_PASSWORD" in open(BASE/".env").read() else "Phoe9Ceixingie5ahsah7fieruNg2eijujoofoA1apu6uwevuv8ait3ieshahh3ish"
+        if "\n" in pwf or "\x00" in pwf:
+            _log("VNC password contains newline/NUL — refusing to store")
+            return
         if not Path("/run/x11vnc-passwd").exists():
-            _sp.run('x11vnc -storepasswd "%s" /run/x11vnc-passwd' % pwf, shell=True)
-        _sp.Popen(["x11vnc","-display",":99","-forever","-shared","-rfbauth","/run/x11vnc-passwd","-rfbport","5900"], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-        _sp.Popen(["/usr/local/lib/hermes-agent/venv/bin/websockify","--web","/opt/noVNC","6080","127.0.0.1:5900"], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+            _sp.run(["x11vnc", "-storepasswd", pwf, "/run/x11vnc-passwd"])
+        _vnc_track(_sp.Popen(["x11vnc","-display",":99","-forever","-shared","-rfbauth","/run/x11vnc-passwd","-rfbport","5900"], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL))
+        import shutil as _shutil
+        _wsock = _shutil.which("websockify") or "/usr/local/lib/hermes-agent/venv/bin/websockify"
+        _vnc_track(_sp.Popen([_wsock,"--web","/opt/noVNC","6080","127.0.0.1:5900"], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL))
         time.sleep(2)
 
 # count protection + minus already-used TH keys (keys.txt + th_oauth_done)
@@ -239,7 +271,7 @@ def th_challenge_loop(pg, email, max_s=300):
         if re.search(r"Open your authenticator app|and this key|authenticator app", T, re.I) and "verification code" not in T.lower():
             m = re.search(r"([a-z0-9]{4}(?:[ -][a-z0-9]{4})+)", T, re.I)
             if m:
-                print(f"  -> Authenticator setup key found: {m.group(1)}")
+                print(f"  -> Authenticator setup key found: {m.group(1)[:12]}...")
                 if _save_2fa_secret(email, m.group(1)):
                     print("  -> Saved 2FA secret; future logins auto-fill")
                 code = _totp_for(email)
@@ -332,7 +364,7 @@ def th_challenge_loop(pg, email, max_s=300):
                         inp.fill(code); time.sleep(0.3)
                         nxt = pg.locator("button:has-text('Next'), button:has-text('Verify'), button:has-text('Continue')").first
                         if nxt.count(): nxt.click()
-                        print(f"  -> Auto-filled code: {code}")
+                        print("  -> Auto-filled code (6-digit)")
                         time.sleep(2); continue
                 except Exception as _e: print(f"[swallow th_oauth_temp_v2.py:272] {_e}")
             print("  -> No text match, continuing...."); continue
@@ -591,9 +623,12 @@ with sync_playwright() as pw:
             final = pg.url or ""
             m = re.search(r"[?&]code=([^&]+)", final)
             if m or "dashboard" in final.lower():
-                success += 1
-                already_done.add(email)
-                done_file.open("a").write(email + "\n")
+                # keystore PRIMARY (JSON source of truth); txt below stays as mirror
+                try:
+                    import keystore as _ksmod
+                    _ksmod.store().upsert(email, password=password, api_key=api_key)
+                except Exception as e:
+                    print(f"  keystore save fail: {str(e)[:60]}")
                 # save to keys.txt: email|password|api_key
                 try:
                     kf = BASE / "data" / "keys.txt"
@@ -617,6 +652,12 @@ with sync_playwright() as pw:
                             print(f"  relay check: {_r.status_code} {'✅ LIVE' if _r.ok else _r.text[:80]}")
                         except Exception as e: print(f"  relay check fail: {str(e)[:60]}")
                 except Exception as e: print(f"  keys.txt save fail: {str(e)[:60]}")
+                if api_key:
+                    success += 1
+                    already_done.add(email)
+                    done_file.open("a").write(email + "\n")
+                else:
+                    print("  ⚠️ no key — not marking done (will retry)")
                 code = m.group(1) if m else "dashboard"
                 print(f"  ✅ code {code[:20]}...")
         except (KeyboardInterrupt, SystemExit):

@@ -1969,13 +1969,17 @@ def _next_proxy(c, last=None):
                 "-m", "6", "http://api.ipify.org"],
                 capture_output=True, text=True, timeout=8)
             if r.returncode == 0 and r.stdout.strip() and r.stdout.strip().count('.') == 3:
-                return ("socks5", "127.0.0.1", 7920, "proxy", "wuzz@04Store")
+                _lp = ("socks5", "127.0.0.1", 7920, "proxy", "wuzz@04Store")
+                if not _is_ratelimited(_proxy_id(_lp)):
+                    return _lp
         except Exception as _e:
             print(f"[swallow th-tui.py:1586] {_e}")
             pass
         # fall through to list
     if mode == "vpngate":
         p = pm.vpngate_proxy()
+        if p and _is_ratelimited(_proxy_id(p)):
+            return None
         return p
     if mode == "egress":
         return _next_egress_proxy(c)
@@ -1992,6 +1996,8 @@ def _next_proxy(c, last=None):
                 print(f"[swallow th-tui.py:1617] {_e}")
                 p = None
         if p:
+            if _is_ratelimited(_proxy_id(p)):
+                return None
             _host = p[1] if len(p) > 1 else "?"
             _port = p[2] if len(p) > 2 else "?"
             log(f"Using MANUAL proxy (override): {_host}:{_port}", "ok")
@@ -2012,7 +2018,7 @@ def _next_proxy(c, last=None):
             return None
         p, ip = pm.smart_pick_proxy(fresh, used_ips=used_ips)
         if p:
-            pass  # caller adds to _used_proxy_ips on failure
+            c["_last_proxy_ip"] = ip
             log(f"Using proxy: {p[1] if len(p)>1 else '?'}:{p[2] if len(p)>2 else '?'} (IP: {ip}, order=least)", "info")
             return p
         return None
@@ -2052,8 +2058,8 @@ def _next_proxy(c, last=None):
         # target-blocked hosts for tokenharbor.ai (measured, not failures)
         if p[1] in c.get("_skip_th_hosts", []):
             continue
-        # skip proxies on 1h rate-limit cooldown
-        if _is_ratelimited(_proxy_id(p)):
+        # skip proxies on 1h rate-limit cooldown (reuse cached set)
+        if _proxy_id(p) in _rl_now:
             dlog(f"skip ratelimited proxy: {_proxy_id(p)}")
             continue
         if checked >= 30:
@@ -3465,12 +3471,19 @@ def imp_router(api_key, cfg=None, prov_type="openai", node_id="", force=False, p
     try:
         proc = subprocess.Popen([sys.executable, str(BASE / "import" / "import_tokenharbor.py"),
                                  "--router-base", base, "--file", str(KEYS_FILE)] + extra,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                start_new_session=True)
         try:
             out, _ = proc.communicate(timeout=300)
             rcode = proc.returncode
         except subprocess.TimeoutExpired:
-            proc.kill()
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
             out, _ = proc.communicate()
             rcode = 124
             elog("import timed out after 300s (killed); successes already flagged, re-run resumes", "")
@@ -3479,11 +3492,17 @@ def imp_router(api_key, cfg=None, prov_type="openai", node_id="", force=False, p
         # re-run resumes exactly — show the pause prompt, not a bare exit.
         if proc is not None:
             try:
-                proc.terminate()
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                 try:
                     proc.wait(timeout=10)
                 except Exception:
-                    proc.kill()
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
             except Exception:
                 pass
         log("Import interrupted — flagged keys stay imported, re-run resumes", "warn")
@@ -3734,7 +3753,7 @@ def reverify_flow(c, email, password):
                 keys = r2.json().get("data", []) or r2.json().get("keys", [])
                 if keys:
                     key = keys[0].get("key", "") or keys[0].get("accessToken", "")
-                    log(f"API key fetched: {key[:40]}...", "ok")
+                    log(f"API key fetched: {key[:12]}...", "ok")
             except Exception as _e:
                 print(f"[swallow th-tui.py:2700] {_e}")
                 pass
@@ -3885,6 +3904,7 @@ def menu_create():
         raw_input("  " + DI + "Press Enter" + RS)
         return
     clear_stop()
+    old_handler = signal.signal(signal.SIGINT, _batch_sigint_handler)
     try:
         ms = get_active_mail(c)
         # Public tempmail path — no mail server configured but tempmail option on
@@ -3983,6 +4003,10 @@ def menu_create():
     except KeyboardInterrupt:
         log("Create cancelled by user", "warn")
     finally:
+        try:
+            signal.signal(signal.SIGINT, old_handler)
+        except Exception:
+            pass
         clear_stop()
     raw_input("  " + DI + "Press Enter to continue..." + RS)
 
@@ -4112,6 +4136,9 @@ def menu_reverify():
     log(f"Found {len(unver)} unverified accounts", "info")
     ok = 0
     for rec in unver:
+        if STOP_EVENT.is_set() or _BATCH_INTERRUPT:
+            log("Reverify interrupted by user", "warn")
+            break
         email = rec["email"]
         pw = rec.get("password", "")
         api_key = rec.get("api_key", "")
@@ -4376,7 +4403,7 @@ def menu_tokens():
             if not view:
                 log("No records to delete", "warn")
                 continue
-            choices = [(rec["email"], rec["email"], rec.get("api_key", "")[:20]) for rec in view]
+            choices = [(rec["email"], rec["email"], rec.get("api_key", "")[:12] + "...") for rec in view]
             chosen = pick_multi("Select account(s) to delete (Space to multi)", choices, searchable=True)
             if chosen:
                 emails = list(chosen)
@@ -4414,21 +4441,21 @@ def menu_tokens():
             if not view:
                 log("No records", "warn")
                 continue
-            choices = [(rec["email"], rec["email"], rec.get("api_key", "")[:20]) for rec in view]
+            choices = [(rec["email"], rec["email"], rec.get("api_key", "")[:12] + "...") for rec in view]
             chosen = pick_multi("Select account(s) to view keys (Space to multi)", choices)
             if chosen:
                 for email in list(chosen):
                     rec = next((x for x in keys if x.get("email") == email), None)
                     if rec and rec.get("api_key"):
                         print("\n  " + W + BD + "API KEY (" + email + "):" + RS)
-                        print("  " + Y + rec["api_key"] + RS)
+                        print("  " + Y + rec["api_key"][:12] + "..." + RS)
                 raw_input("  " + DI + "Press Enter to continue..." + RS)
         elif k in ('c', 'C'):
             # Check a specific account's key
             if not view:
                 log("No records to check", "warn")
                 continue
-            choices = [(rec["email"], rec["email"], rec.get("api_key", "")[:20]) for rec in view]
+            choices = [(rec["email"], rec["email"], rec.get("api_key", "")[:12] + "...") for rec in view]
             chosen = pick_one("Select account to check", choices)
             if chosen:
                 email = chosen[0]
@@ -5503,7 +5530,24 @@ def main():
     load_cfg()
     try:
         import time as _t
-        log(f"TH-TUI build {TUI_BUILD} (restart after updates — old sessions run stale code)", "info")
+        try:
+            _self = str(Path(__file__).resolve())
+            _head = ""
+            _state = ""
+            try:
+                _head = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                                       capture_output=True, text=True, timeout=5,
+                                       cwd=str(BASE)).stdout.strip()
+                _st = subprocess.run(["git", "status", "--porcelain", "--", "th-tui.py"],
+                                     capture_output=True, text=True, timeout=5,
+                                     cwd=str(BASE)).stdout.strip()
+                _state = "dirty" if _st else ("clean" if _head else "")
+            except Exception:
+                pass
+            _extra = f" file={_self}" + (f" head={_head} {_state}".rstrip() if _head else (f" {_state}".rstrip() if _state else ""))
+            log(f"TH-TUI build {TUI_BUILD}{_extra} (restart after updates — old sessions run stale code)", "info")
+        except Exception:
+            log(f"TH-TUI build {TUI_BUILD} (restart after updates — old sessions run stale code)", "info")
         raw_start()          # cbreak mode with ISIG kept (Ctrl+C still SIGINT)
         enter_fullscreen()   # tmux/vim-style full control until exit
         while True:

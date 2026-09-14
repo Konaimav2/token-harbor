@@ -47,8 +47,6 @@ def _bootstrap():
         print(f"  [deps] run manually: {sys.executable} -m pip install playwright")
         sys.exit(1)
 
-_bootstrap()
-
 REGISTER_URL = "https://dashboard.webshare.io/register?source=login_signup_link"
 API_BASE = "https://proxy.webshare.io/api/v2"
 RECAPTCHA_SITEKEY = "6LeHZ6UUAAAAAKat_YS--O2tj_by3gv3r_l03j9d"
@@ -1227,6 +1225,26 @@ def _env_vnc_pw():
     return ""
 
 
+_VNC_OWNED = []  # Popen handles WE started (kill by PID, never bare pkill)
+
+
+def _vnc_track(proc):
+    try:
+        _VNC_OWNED.append(proc)
+    except Exception:
+        pass
+    return proc
+
+
+def _vnc_cleanup():
+    for p in list(_VNC_OWNED):
+        try:
+            p.terminate()
+        except Exception:
+            pass
+    _VNC_OWNED.clear()
+
+
 def _start_vnc_stack():
     """Ensure Xvfb(:99) + x11vnc(5900) + websockify(6080) are running for headed mode.
     Non-blocking; each component started only if its port/process is missing."""
@@ -1244,8 +1262,8 @@ def _start_vnc_stack():
     os.environ.setdefault("DISPLAY", ":99")
     # 1. Xvfb — process + display check
     if not (_sp.call("pgrep -x Xvfb >/dev/null 2>&1", shell=True) == 0):
-        _sp.Popen(["Xvfb", ":99", "-screen", "0", "1280x900x24", "-nolisten", "tcp"],
-                  stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        _vnc_track(_sp.Popen(["Xvfb", ":99", "-screen", "0", "1280x900x24", "-nolisten", "tcp"],
+                   stdout=_sp.DEVNULL, stderr=_sp.DEVNULL))
         for _ in range(10):
             time.sleep(1)
             if _sp.call("DISPLAY=:99 xdpyinfo >/dev/null 2>&1", shell=True) == 0:
@@ -1253,8 +1271,11 @@ def _start_vnc_stack():
         log("Started Xvfb :99", "ok" if _port_open(5900) or _sp.call("pgrep -x Xvfb >/dev/null 2>&1", shell=True) == 0 else "err")
     # 2. x11vnc — port 5900 check
     if not _port_open(5900):
+        if "\n" in auth_xs or "\x00" in auth_xs:
+            log("VNC password contains newline/NUL — refusing to store", "err")
+            return
         if not os.path.exists("/run/x11vnc-passwd"):
-            _sp.run('x11vnc -storepasswd "%s" /run/x11vnc-passwd' % auth_xs, shell=True)
+            _sp.run(["x11vnc", "-storepasswd", auth_xs, "/run/x11vnc-passwd"])
             try:
                 os.chmod("/run/x11vnc-passwd", 0o600)
             except Exception as _e:
@@ -1263,14 +1284,14 @@ def _start_vnc_stack():
         elif os.environ.get("VNC_PASSWORD") or _env_vnc_pw():
             # refresh stored passwd to match .env (avoids stale/old pw)
             try:
-                _sp.run('x11vnc -storepasswd "%s" /run/x11vnc-passwd' % auth_xs, shell=True)
+                _sp.run(["x11vnc", "-storepasswd", auth_xs, "/run/x11vnc-passwd"])
                 os.chmod("/run/x11vnc-passwd", 0o600)
             except Exception as _e:
                 print(f"[swallow th-webshare.py:1115] {_e}")
                 pass
-        _sp.Popen(["x11vnc", "-display", ":99", "-forever", "-shared",
+        _vnc_track(_sp.Popen(["x11vnc", "-display", ":99", "-forever", "-shared",
                    "-rfbauth", "/run/x11vnc-passwd", "-rfbport", "5900"],
-                  stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+                  stdout=_sp.DEVNULL, stderr=_sp.DEVNULL))
         for _ in range(10):
             time.sleep(1)
             if _port_open(5900):
@@ -1282,8 +1303,8 @@ def _start_vnc_stack():
         if not os.path.isdir(os.path.join(web_dir, "vnc.html")):
             alt = _sp.getoutput("ls -d /tmp/*noVNC* 2>/dev/null; ls -d /root/*noVNC* 2>/dev/null").strip().split()
             web_dir = next((d for d in alt if os.path.isdir(os.path.join(d, "vnc.html"))), web_dir)
-        _sp.Popen(["websockify", "--web", web_dir, "6080", "127.0.0.1:5900"],
-                  stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        _vnc_track(_sp.Popen(["websockify", "--web", web_dir, "6080", "127.0.0.1:5900"],
+                  stdout=_sp.DEVNULL, stderr=_sp.DEVNULL))
         for _ in range(10):
             time.sleep(1)
             if _port_open(6080):
@@ -1299,6 +1320,12 @@ def _start_vnc_stack():
 
 
 def main():
+    _bootstrap()
+    try:
+        import atexit as _atexit
+        _atexit.register(_vnc_cleanup)
+    except Exception:
+        pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--count", type=int, default=1)
     ap.add_argument("--vnc", dest="vnc", action="store_true",
@@ -1517,9 +1544,13 @@ def main():
             return None
         usable = _usable_indices()
         if not usable:
-            log("All proxies currently throttled/blocked — clearing block list to reuse", "warn")
+            log("All proxies currently throttled/blocked — clearing in-memory blocks (persist cooldown still honored)", "warn")
             proxy_blocked.clear()
-            usable = list(range(len(proxy_list)))
+            usable = _usable_indices()
+            if not usable:
+                log("All proxies still on persist cooldown — waiting instead of forcing reuse", "warn")
+                current_proxy, current_proxy_idx = None, None
+                return None
         # Choose index based on ordering
         if proxy_order == "top":
             # sequential from top: first usable index
@@ -1686,12 +1717,12 @@ def _cleanup_vnc(force=False):
     be shared with other tooling)."""
     import subprocess as _sp
     if force:
-        _sp.run('pkill -f "[c]hromium-browser.*--no-sandbox" ; pkill -f "[X]vfb :99" ; '
-                'pkill -f "[x]11vnc -display :99" ; pkill -f "[w]ebsockify 6080" ; true',
+        _sp.run('pkill -f "[c]hromium.*--no-sandbox.*:99" ; pkill -f "[X]vfb :99 -screen" ; '
+                'pkill -f "[x]11vnc -display :99 -rfbport 5900" ; pkill -f "[w]ebsockify.*6080.*5900" ; true',
                 shell=True)
     else:
         # only our own browser leftovers (DISPLAY :99 headed chromium)
-        _sp.run('pkill -f "[c]hromium-browser --no-sandbox" ; true', shell=True)
+        _sp.run('pkill -f "[c]hromium.*--no-sandbox.*:99" ; true', shell=True)
     return True
 
 
@@ -1703,7 +1734,7 @@ if __name__ == "__main__":
         print("\nInterrupted")
         # tear down VNC stack we started (leave other tooling alone)
         import subprocess as _sp
-        _sp.run('pkill -f "[c]hromium-browser.*--no-sandbox" ; pkill -f "[X]vfb :99" ; '
-                'pkill -f "[x]11vnc -display :99" ; pkill -f "[w]ebsockify 6080" ; true',
+        _sp.run('pkill -f "[c]hromium.*--no-sandbox.*:99" ; pkill -f "[X]vfb :99 -screen" ; '
+                'pkill -f "[x]11vnc -display :99 -rfbport 5900" ; pkill -f "[w]ebsockify.*6080.*5900" ; true',
                 shell=True)
         sys.exit(1)

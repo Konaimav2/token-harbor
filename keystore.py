@@ -56,18 +56,31 @@ class KeyStore:
     def __init__(self, path=None):
         self.path = Path(path or JSON_PATH)
         self._lock_fh = None
+        self._depth = 0
 
     # ── locking ──
     def _lock(self):
+        if getattr(self, "_depth", 0) > 0:
+            self._depth += 1
+            return self
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock_fh = open(self.path.with_suffix(".json.lock"), "w")
         try:
             fcntl.flock(self._lock_fh, fcntl.LOCK_EX)
-        except Exception:
-            pass
+        except Exception as e:
+            try:
+                self._lock_fh.close()
+            except Exception:
+                pass
+            self._lock_fh = None
+            raise RuntimeError(f"keystore lock failed: {e}")
+        self._depth = 1
         return self
 
     def _unlock(self):
+        self._depth = max(0, getattr(self, "_depth", 1) - 1)
+        if self._depth > 0:
+            return self
         try:
             if self._lock_fh:
                 fcntl.flock(self._lock_fh, fcntl.LOCK_UN)
@@ -84,19 +97,34 @@ class KeyStore:
         return self._unlock() is None
 
     # ── load / save ──
+    def _quarantine(self, why):
+        """Move a corrupt store aside (never overwrite in place)."""
+        import time as _t
+        bak = self.path.with_name(f"{self.path.stem}.corrupt-{int(_t.time())}.json")
+        try:
+            self.path.rename(bak)
+            print(f"[keystore] quarantined {self.path.name} -> {bak.name} ({why})")
+        except Exception as e:
+            print(f"[keystore] quarantine failed: {e}")
+
     def load(self):
         """Return list of records (migrates legacy files on first run)."""
         if self.path.exists():
             try:
                 data = json.loads(self.path.read_text())
-                if isinstance(data, list):
+            except Exception as e:
+                data = None
+                self._quarantine(f"unparseable: {e}")
+            if isinstance(data, list):
+                with self:
                     if self._backfill_health(data):
                         self.save(data)
-                    return data
-            except Exception:
-                pass
+                return data
+            if data is not None:
+                self._quarantine(f"unexpected {type(data).__name__}, want list")
         recs = self._migrate()
-        self.save(recs)
+        with self:
+            self.save(recs)
         return recs
 
     def _backfill_health(self, recs):

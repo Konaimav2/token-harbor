@@ -22,6 +22,8 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent
 STATE_FILE = BASE / "proxy" / "egress.json"
 BASE_PORT = 18091
+PIDFILE = BASE / "proxy" / "egress.pid"
+STATE_MAX_AGE = 600  # 10 minutes
 
 
 def detect_egress_ips():
@@ -55,6 +57,35 @@ def _port_open(port):
         return s.connect_ex(("127.0.0.1", port)) == 0
     finally:
         s.close()
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except Exception:
+        return False
+
+
+def _load_state_validated():
+    """Return STATE_FILE mapping, or [] if stale (old or ports dead)."""
+    import time
+    try:
+        st = STATE_FILE.stat()
+        if time.time() - st.st_mtime > STATE_MAX_AGE:
+            return []
+        state = json.loads(STATE_FILE.read_text())
+    except Exception:
+        return []
+    try:
+        ports = [int(e["proxy"].rsplit(":", 1)[1]) for e in state]
+    except Exception:
+        return []
+    if not ports:
+        return []
+    if not all(_port_open(p) for p in ports):
+        return []  # stale: regenerate on next ensure call
+    return state
 
 
 async def _pipe(reader, writer):
@@ -180,7 +211,9 @@ def ensure_egress_proxies():
         time.sleep(0.3)
     try:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        STATE_FILE.write_text(json.dumps(out, indent=2))
+        tmp = STATE_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(out, indent=2))
+        os.replace(tmp, STATE_FILE)
     except Exception:
         pass
     return out
@@ -190,10 +223,9 @@ def egress_ip_for_proxy(parsed):
     """Map a pool entry back to its egress IP (or '' if not an egress entry)."""
     try:
         if parsed and parsed[0] == "http" and parsed[1] in ("127.0.0.1", "localhost"):
-            try:
-                state = json.loads(STATE_FILE.read_text())
-            except Exception:
-                state = []
+            state = _load_state_validated()
+            if not _port_open(int(parsed[2])):
+                return ""  # stale STATE_FILE (daemon crashed): fail closed
             for ent in state:
                 try:
                     if int(ent["proxy"].rsplit(":", 1)[1]) == int(parsed[2]):
@@ -211,6 +243,21 @@ if __name__ == "__main__":
     print(json.dumps(info, indent=2))
     if "--serve" in sys.argv:
         import time
+        try:
+            PIDFILE.parent.mkdir(parents=True, exist_ok=True)
+            if PIDFILE.exists():
+                try:
+                    old = int(PIDFILE.read_text().strip().split()[0])
+                except Exception:
+                    old = 0
+                if old and (_pid_alive(old) or _port_open(BASE_PORT)):
+                    print(f"already running (pid {old})", file=sys.stderr)
+                    sys.exit(1)
+            PIDFILE.write_text(str(os.getpid()))
+        except SystemExit:
+            raise
+        except Exception:
+            pass
         print("serving (Ctrl+C to stop)...")
         while True:
             time.sleep(3600)

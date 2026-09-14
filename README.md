@@ -41,22 +41,22 @@ python3 th-tui.py
 ```
 token-harbor/
 ├── th-tui.py              # Main interactive TUI (everything in one place)
-├── th-webshare.py         # Webshare registration farm (audio captcha solver)
-├── th-farm.py             # Batch account creator
-├── th-proxy.py            # Proxy management library
-├── th-reverify.py         # Re-verify pending accounts
-├── th_lib.py              # Shared library (colors, helpers, JWT)
-├── import_tokenharbor.py  # Import verified keys → 9router
-├── install.sh             # One-shot dependency installer
-├── run-webshare.sh        # Webshare launcher
-├── .env.example           # Credential template
-├── config.json.example    # Config template
+├── th-webshare.py             # Webshare registration farm (audio captcha solver)
+├── th-flamingo.py             # FlamingoProxies referral farm
+├── th-farm.py                 # Batch account creator
+├── th-proxy.py                # Proxy management library
+├── th-reverify.py             # Re-verify pending accounts
+├── keystore.py                # JSON key store (data/keys.json source of truth)
+├── install.sh                 # One-shot dependency installer
+├── run-webshare.sh            # Webshare launcher
+├── .env.example               # Credential template
+├── config.json.example        # Config template
 │
-├── scripts/               # Additional scripts
-├── import/                # Import helpers
-├── tools/                 # Utilities (enable_free_models, etc.)
-├── webshare/              # Webshare tools
-├── data/                  # Data files (keys.txt, imported.txt) — gitignored
+├── scripts/                   # Additional scripts
+├── import/import_tokenharbor.py # Import verified keys → 9router
+├── tools/                     # Utilities (enable_free_models, etc.)
+├── webshare/                  # Webshare tools
+├── data/                      # Data files (keys.json source of truth, keys.txt mirror) — gitignored
 ├── config/                # Config files (grok.py, th-deps.py) — gitignored
 ├── proxy/                 # Proxy files — gitignored
 ├── logs/                  # Logs — gitignored
@@ -173,11 +173,43 @@ M. Manual proxy   set a locked proxy that overrides auto-check
 
 ## CLI Scripts
 
-### import_tokenharbor.py
+### th-flamingo.py
+Farm FlamingoProxies referral accounts via webshare proxies.
+
+```bash
+python3 th-flamingo.py [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--count N` | number of accounts (default 1) |
+| `--ref CODE` | referral code or affiliate URL |
+| `--proxy PATH` | proxy file (default proxy.txt) |
+| `--proxy-order ORDER` | `top` / `random` |
+| `--max-per-proxy N` | cap accounts per proxy (default 2) |
+| `--delay S` | delay between accounts (default 20) |
+| `--password PW` | fixed password (default random) |
+| `--captcha-key KEY` | 2captcha/AZCaptcha key for v3 resubmit |
+| `--captcha-provider NAME` | captcha provider (default 2captcha) |
+| `--gmail-cookie ADDR` | google session cookies for v3 boost, or `auto` |
+| `--oauth-gmail ADDR` | register via Google OAuth (address, `auto`, or comma list) |
+| `--verify-email ADDR` | verify email on existing OAuth account(s) |
+| `--no-proxy` | direct connection (exposes host IP) |
+| `--gen-only` | skip signup: redeem + generate proxies |
+| `--gen-accounts LIST` | farm emails for gen mode (default all verified/registered) |
+| `--gen-qty N` | proxies per account (default 5) |
+| `--sticky N` | sticky minutes 2-5 (default 5) |
+| `--country ID` | country id or _country-id for any |
+| `--gen-plan N` | proxy_plan id (default 2=Standard) |
+| `--watch N` | re-check points every N minutes (0=off) |
+| `--rounds N` | max watch rounds (0=unlimited) |
+| `--vnc` | headed browser (debug) |
+
+### import/import_tokenharbor.py
 Import verified keys from keys.txt to a 9router instance.
 
 ```bash
-python3 import_tokenharbor.py [options]
+python3 import/import_tokenharbor.py [options]
 ```
 
 | Option | Description |
@@ -199,24 +231,25 @@ python3 import_tokenharbor.py [options]
 | `--skip-verify` | skip key re-check (default True) |
 | `--check-keys` | re-check keys before import |
 | `--workers N` | parallel workers (default 8) |
+| `--pull-sayang` | pull sayang_/Harbor_ connections FROM 9router INTO keystore (needs --remote-db) |
 
 **Examples:**
 ```bash
 # Local 9router, default prefix
-python3 import_tokenharbor.py
+python3 import/import_tokenharbor.py
 
 # Remote 9router with password + SSH dedup
-python3 import_tokenharbor.py \
+python3 import/import_tokenharbor.py \
     --router-base https://vibecode.omori.my.id \
     --router-password 'your-pass' \
     --remote-db root@162.35.169.101 \
     --prefix sayang_
 
 # Force re-import (still respects DB dedup)
-python3 import_tokenharbor.py --force
+python3 import/import_tokenharbor.py --force
 
 # Dry run (test connection)
-python3 import_tokenharbor.py --dry-run --router-base https://vibecode.omori.my.id
+python3 import/import_tokenharbor.py --dry-run --router-base https://vibecode.omori.my.id
 ```
 
 ### th-webshare.py
@@ -229,7 +262,8 @@ python3 th-webshare.py [options]
 | Option | Description |
 |--------|-------------|
 | `--count N` | number of accounts to register (default 1) |
-| `--vnc` | visible browser (manual captcha) |
+| `--vnc` | visible browser, auto solver (does NOT pause for manual solve) |
+| `--vnc-manual` | visible browser + pause for human captcha solve |
 | `--cleanup-vnc` | kill leftover Xvfb/Chromium on exit (frees :99) |
 | `--vnc-auto` | headed browser, fully automatic solving |
 | `--proxy URL` | proxy for registration |
@@ -237,6 +271,7 @@ python3 th-webshare.py [options]
 | `--captcha-provider NAME` | captcha provider (default 2captcha) |
 | `--email-file PATH` | catch-all emails file |
 | `--mails SOURCE` | mail source: `cloud-mail` / `mailg` / server name |
+| `--create` | for cloud-mail: generate fresh new mailboxes |
 | `--proxy-order ORDER` | `random` / `top` / `least` |
 | `--skip-wait-throttle` | skip post-registration throttle |
 | `--max-per-proxy N` | max accounts per proxy |

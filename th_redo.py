@@ -164,7 +164,7 @@ def th_challenge_loop(pg, email, max_s=300):
         if re.search(r"Open your authenticator app|and this key|authenticator app", T, re.I) and "verification code" not in T.lower():
             m = re.search(r"([a-z0-9]{4}(?:[ -][a-z0-9]{4})+)", T, re.I)
             if m:
-                _log(f"authenticator setup key: {m.group(1)}")
+                _log(f"authenticator setup key: {m.group(1)[:12]}...")
                 if _save_2fa_secret(email, m.group(1)): _log("saved 2FA secret to .2fa-secrets")
                 code = _totp_for(email)
                 try:
@@ -173,7 +173,7 @@ def th_challenge_loop(pg, email, max_s=300):
                         inp.fill(code); time.sleep(0.3)
                         nxt = pg.locator("button:has-text('Next'), button:has-text('Verify')").first
                         if nxt.count(): nxt.click()
-                        _log(f"auto-filled TOTP {code}"); time.sleep(1.5); continue
+                        _log("auto-filled TOTP (6-digit)"); time.sleep(1.5); continue
                 except Exception as _e: print(f"[swallow th_redo.py:157] {_e}")
             _log("waiting for manual 2FA in VNC..."); time.sleep(3); continue
         # 2SV chooser → Google Authenticator
@@ -251,7 +251,7 @@ def th_challenge_loop(pg, email, max_s=300):
                         inp.fill(code); time.sleep(0.3)
                         nxt = pg.locator("button:has-text('Next'), button:has-text('Verify'), button:has-text('Continue')").first
                         if nxt.count(): nxt.click()
-                        _log(f"auto-filled TOTP {code}"); time.sleep(2); continue
+                        _log("auto-filled TOTP (6-digit)"); time.sleep(2); continue
                 except Exception as _e: print(f"[swallow th_redo.py:235] {_e}")
             _log("code screen but no TOTP secret — waiting in VNC"); time.sleep(5); continue
         # OAuth consent (app wants Google profile/email) → Allow/Izinkan.
@@ -480,7 +480,7 @@ def process_account(ctx, pg_mail, pg_th, email):
             bk = pg_th.inner_text("body", timeout=6000)
             m = re.search(r"thk_[a-zA-Z0-9_-]{20,}", bk)
             if m: api_key = m.group(0)
-    print(f"  key: {api_key[:18]}" if api_key else "  key: NONE")
+    print(f"  key: {api_key[:12]}..." if api_key else "  key: NONE")
     # 5b. set a known password on the account via Supabase (OAuth session ->
     # access token -> updateUser). Makes keys.txt password REAL, not placeholder.
     if api_key:
@@ -503,10 +503,24 @@ def process_account(ctx, pg_mail, pg_th, email):
                 print("  password set: skipped (no sb token in localStorage)")
         except Exception as e:
             print(f"  password set err: {str(e)[:100]}")
-    # 6. save to keystore (JSON source of truth; legacy txt mirror auto-updated)
+    # 6. dual-write: keystore PRIMARY (JSON source of truth), txt mirror (exact 3-col format)
     if api_key:
-        import keystore as _ksmod
-        _ksmod.store().upsert(email, password=PW, api_key=api_key)
+        try:
+            import keystore as _ksmod
+            _ksmod.store().upsert(email, password=PW, api_key=api_key)
+        except Exception as e:
+            print(f"  keystore save fail: {str(e)[:60]}")
+        try:
+            kf = BASE / "data" / "keys.txt"
+            kf.parent.mkdir(parents=True, exist_ok=True)
+            existing = set(l.split("|")[0].lower() for l in kf.read_text().splitlines() if "|" in l) if kf.exists() else set()
+            if email.lower() not in existing:
+                kf.open("a").write(f"{email}|{PW}|{api_key}\n")
+                print(f"  ✅ saved to keys.txt: {email}")
+            else:
+                print(f"  already in keys.txt: {email}")
+        except Exception as e:
+            print(f"  keys.txt save fail: {str(e)[:60]}")
     return api_key
 
 def test_key(api_key):
