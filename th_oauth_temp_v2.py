@@ -10,6 +10,21 @@ import json, time, glob, re, os
 from pathlib import Path
 BASE = Path(__file__).parent
 
+# P8 portable paths: env override (GMAIL_INBOX_DIR legacy root, or per-file
+# vars) → BASE-relative default. Missing → warn + skip, never crash.
+def _gmail_path(env_key, default_rel):
+    v = os.environ.get(env_key)
+    if v:
+        return Path(v)
+    home = os.environ.get("GMAIL_INBOX_DIR")
+    if home:
+        return Path(home) / Path(default_rel).name
+    return BASE / default_rel
+COOKIE_DIR = _gmail_path("GMAIL_COOKIES", "cookies")
+INBOX_DB = str(_gmail_path("GMAIL_INBOX_DB", "data/inbox.db"))
+LOGGEDMAIL = _gmail_path("GMAIL_LOGGEDMAIL", "data/loggedmail.txt")
+SECRETS_FILE = _gmail_path("GMAIL_2FA_SECRETS", "data/.2fa-secrets")
+
 def _log(msg):
     ts = time.strftime("%H:%M:%S")
     print(f"  [{ts}] {msg}", flush=True)
@@ -21,7 +36,9 @@ def _mailg_link(email, kind, since_ts=0, poll_s=120):
     MAILG_API = "http://127.0.0.1:8790"
     _log(f"mailg poll: kind={kind} up to {poll_s}s (fresh after ts={since_ts})")
     try:
-        key = sqlite3.connect("/root/projects/gmail-inbox/inbox.db").execute(
+        if not Path(INBOX_DB).exists():
+            raise FileNotFoundError(f"mailg DB missing: {INBOX_DB} (set GMAIL_INBOX_DB or GMAIL_INBOX_DIR)")
+        key = sqlite3.connect(INBOX_DB).execute(
             "SELECT value FROM settings WHERE key='api_key'").fetchone()[0]
     except Exception as e:
         _log(f"mailg api key fail: {e}"); return "", 0
@@ -74,11 +91,15 @@ for a in __import__("sys").argv[1:]:
 
 # use mailg cookies + loggedlist matched counts
 import sqlite3
-COOKIE_DIR = Path("/root/projects/gmail-inbox/cookies")
+def _warn_missing(p, env_hint):
+    if not Path(p).exists():
+        _log(f"⚠️ missing: {p} (set {env_hint}) — related steps will skip")
+_warn_missing(COOKIE_DIR, "GMAIL_COOKIES or GMAIL_INBOX_DIR")
+_warn_missing(INBOX_DB, "GMAIL_INBOX_DB or GMAIL_INBOX_DIR")
 
 def cookie_email(name):
     try:
-        db = sqlite3.connect("/root/projects/gmail-inbox/inbox.db")
+        db = sqlite3.connect(INBOX_DB)
         cur = db.execute("SELECT email FROM accounts WHERE cookie_file=?", (name,))
         row = cur.fetchone()
         if row: return row[0]
@@ -87,7 +108,7 @@ def cookie_email(name):
 
 # count email list used — match mailg cookies with loggedlist
 logged = set()
-lf = Path("/root/projects/gmail-inbox/loggedmail.txt")
+lf = LOGGEDMAIL
 if lf.exists():
     for ln in lf.read_text().splitlines():
         if "|" in ln: logged.add(ln.split("|")[0].strip())
@@ -205,7 +226,7 @@ if len(available) < COUNT:
 else:
     cookies=available
 if not cookies:
-    print("[!] no eligible cookies after minus used — abort")
+    print("[!] no eligible cookies after minus used — abort (set GMAIL_COOKIES or GMAIL_INBOX_DIR if mailbox moved)")
     raise SystemExit(0)
 
 # ---- ported from gmail-inbox run-batch.mjs: full challenge loop (phone tap / passkey /
@@ -213,7 +234,7 @@ if not cookies:
 import base64 as _b64c, hmac as _hmc, hashlib as _hsc, struct as _stc
 
 def _totp_for(email):
-    secf = Path("/root/projects/gmail-inbox/.2fa-secrets")
+    secf = SECRETS_FILE
     if not secf.exists(): return ""
     for ln in secf.read_text().splitlines():
         if ln.lower().startswith(email.lower()+"|"):
@@ -232,7 +253,8 @@ def _totp_for(email):
 
 def _save_2fa_secret(email, key_group):
     try:
-        secf = Path("/root/projects/gmail-inbox/.2fa-secrets")
+        secf = SECRETS_FILE
+        secf.parent.mkdir(parents=True, exist_ok=True)
         secret = key_group.replace(" ","").replace("-","").upper()
         lines = secf.read_text().splitlines() if secf.exists() else []
         out, seen = [], False

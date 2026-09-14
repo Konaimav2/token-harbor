@@ -19,8 +19,19 @@ import json, time, re, os, sys
 from pathlib import Path
 os.environ.setdefault("DISPLAY", ":99")
 BASE = Path(__file__).resolve().parent
-COOKIE_DIR = Path(os.environ.get("GMAIL_COOKIES", "/root/projects/gmail-inbox/cookies"))
-INBOX_DB = os.environ.get("GMAIL_INBOX_DB", "/root/projects/gmail-inbox/inbox.db")
+# P8 portable paths: env override (GMAIL_INBOX_DIR legacy root, or per-file
+# vars) → BASE-relative default. Missing → warn + skip, never crash.
+def _gmail_path(env_key, default_rel):
+    v = os.environ.get(env_key)
+    if v:
+        return Path(v)
+    home = os.environ.get("GMAIL_INBOX_DIR")
+    if home:
+        return Path(home) / Path(default_rel).name
+    return BASE / default_rel
+COOKIE_DIR = _gmail_path("GMAIL_COOKIES", "cookies")
+INBOX_DB = str(_gmail_path("GMAIL_INBOX_DB", "data/inbox.db"))
+SECRETS_FILE = _gmail_path("GMAIL_2FA_SECRETS", "data/.2fa-secrets")
 RELAY = "https://vercel-relay-1j23u4mq1-konaimav2s-projects.vercel.app"
 MAILG_API = "http://127.0.0.1:8790"
 VNC = "--vnc" in sys.argv
@@ -51,6 +62,8 @@ def parse_accounts():
     return todo
 
 def cookie_file_for(email):
+    if not COOKIE_DIR.exists():
+        print(f"[warn] cookie dir missing: {COOKIE_DIR} (set GMAIL_COOKIES or GMAIL_INBOX_DIR)")
     try:
         import sqlite3
         db = sqlite3.connect(INBOX_DB)
@@ -61,6 +74,8 @@ def cookie_file_for(email):
 
 def _mailg_key():
     import sqlite3
+    if not Path(INBOX_DB).exists():
+        raise FileNotFoundError(f"mailg DB missing: {INBOX_DB} (set GMAIL_INBOX_DB or GMAIL_INBOX_DIR)")
     db = sqlite3.connect(INBOX_DB)
     return db.execute("SELECT value FROM settings WHERE key='api_key'").fetchone()[0]
 
@@ -72,7 +87,7 @@ def _log(msg):
 import base64 as _b64c, hmac as _hmc, hashlib as _hsc, struct as _stc
 
 def _totp_for(email):
-    secf = Path("/root/projects/gmail-inbox/.2fa-secrets")
+    secf = SECRETS_FILE
     if not secf.exists(): return ""
     for ln in secf.read_text().splitlines():
         if ln.lower().startswith(email.lower()+"|"):
@@ -91,7 +106,8 @@ def _totp_for(email):
 
 def _save_2fa_secret(email, key_group):
     try:
-        secf = Path("/root/projects/gmail-inbox/.2fa-secrets")
+        secf = SECRETS_FILE
+        secf.parent.mkdir(parents=True, exist_ok=True)
         secret = key_group.replace(" ","").replace("-","").upper()
         lines = secf.read_text().splitlines() if secf.exists() else []
         out, seen = [], False
@@ -101,6 +117,9 @@ def _save_2fa_secret(email, key_group):
             else: out.append(l)
         if not seen: out.append(f"{email}|{secret}")
         secf.write_text("\n".join(out)+"\n")
+        try:
+            os.chmod(secf, 0o600)  # TOTP secrets: owner-only
+        except Exception: pass
         return True
     except Exception as _e: print(f"[swallow th_redo.py] {_e}"); return False
 
@@ -277,7 +296,11 @@ def th_challenge_loop(pg, email, max_s=300):
 def mailg_links(email, kind, since_ts=0, poll_s=90):
     """mailg API: newest TH links of kind (verify|reset) from body_html. Polls until fresh link arrives. FULL LOGS."""
     import requests, urllib.parse
-    key = _mailg_key()
+    try:
+        key = _mailg_key()
+    except Exception as e:
+        _log(f"mailg poll skipped: {e}")
+        return "", 0
     H = {"X-API-Key": key}
     em = urllib.parse.quote(email)
     deadline = time.time() + poll_s
@@ -390,7 +413,10 @@ def is_logged(pg):
 def process_account(ctx, pg_mail, pg_th, email):
     print(f"\n=== {email} ===")
     # 1. OAuth via Google (cookies injected) — password later
-    raw = json.loads(cookie_file_for(email).read_text())
+    cf = cookie_file_for(email)
+    if not cf.exists():
+        print(f"  ⛔ cookie file missing: {cf} (set GMAIL_COOKIES or GMAIL_INBOX_DIR) — skip account"); return None
+    raw = json.loads(cf.read_text())
     g = [{"name": c["name"], "value": c["value"], "domain": c["domain"], "path": c.get("path", "/"),
           "secure": bool(c.get("secure", True)), "httpOnly": bool(c.get("httpOnly", False)),
           "sameSite": c.get("sameSite", "Lax")}
@@ -516,6 +542,9 @@ def process_account(ctx, pg_mail, pg_th, email):
             existing = set(l.split("|")[0].lower() for l in kf.read_text().splitlines() if "|" in l) if kf.exists() else set()
             if email.lower() not in existing:
                 kf.open("a").write(f"{email}|{PW}|{api_key}\n")
+                try:
+                    os.chmod(kf, 0o600)  # password+api_key: owner-only
+                except Exception: pass
                 print(f"  ✅ saved to keys.txt: {email}")
             else:
                 print(f"  already in keys.txt: {email}")
@@ -599,8 +628,9 @@ if __name__ == "__main__":
                     import requests as _rq, urllib.parse as _up
                     try:
                         _em = _up.quote(email)
+                        _mk = _mailg_key()
                         _msgs = _rq.get(f"{MAILG_API}/api/accounts/{_em}/messages?limit=1",
-                                        headers={"X-API-Key": _mailg_key()}, timeout=8)
+                                        headers={"X-API-Key": _mk}, timeout=8)
                         if _msgs.status_code != 200:
                             print(f"⛔ {email}: mailg API auth fail ({_msgs.status_code})")
                             results[email] = "mailg_auth_fail"; continue

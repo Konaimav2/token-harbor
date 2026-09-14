@@ -38,6 +38,22 @@ if __name__ == "__main__" and _venv_py.exists():
 
 AUTH_BASE = "https://auth.flamingoproxies.com"
 DASH_BASE = "https://dashboard.flamingoproxies.com"
+
+# ── gmail-inbox home: $GMAIL_HOME / $TH_GMAIL_HOME → ~/projects/gmail-inbox.
+# Missing paths warn at use site and degrade gracefully, never crash. ──
+def _gmail_home():
+    return Path(os.environ.get("GMAIL_HOME") or os.environ.get("TH_GMAIL_HOME")
+                or (Path.home() / "projects" / "gmail-inbox"))
+
+
+def _gmail_cookie_dir():
+    env = os.environ.get("GMAIL_COOKIES")
+    return Path(env) if env else _gmail_home() / "cookies"
+
+
+def _gmail_inbox_db():
+    return (os.environ.get("GMAIL_INBOX_DB") or os.environ.get("TH_MAILG_DB")
+            or str(_gmail_home() / "inbox.db"))
 V3_SITEKEY = "6LeQUB8sAAAAAF1dsVInisFV-UO6hZQj6cowDm48"  # recaptcha v3 (invisible)
 
 STEALTH_JS = """() => {
@@ -89,7 +105,11 @@ def _launch_browser(p, exe, headless, proxy_host=""):
         pass
     try:
         import shutil
-        real = shutil.which("google-chrome") or "/opt/google/chrome/google-chrome"
+        real = (os.environ.get("TH_CHROME_PATH") or shutil.which("google-chrome")
+                or "/opt/google/chrome/google-chrome")
+        if not Path(real).exists():
+            log(f"chrome not at {real} (set TH_CHROME_PATH), using bundled chromium", "warn")
+            raise FileNotFoundError(real)
         return p.chromium.launch(executable_path=real, headless=headless, args=base_args)
     except Exception:
         pass
@@ -99,6 +119,30 @@ DEFAULT_REF = "FLGCEJ36R52S"
 
 ACCOUNTS_FILE = BASE / "flamingo_accounts.txt"
 USED_FILE = BASE / "flamingo_used.txt"
+
+
+def _save_debug_shot(pg, stem):
+    """Save a debug screenshot (0600) + TTL purge: delete debug_shots older than 72h."""
+    try:
+        _dir = BASE / "debug_shots"
+        _dir.mkdir(exist_ok=True)
+        _shot = _dir / f"{stem}_{int(time.time())}.png"
+        pg.screenshot(path=str(_shot))
+        try:
+            os.chmod(_shot, 0o600)
+        except Exception:
+            pass
+        # TTL 72h: purge stale shots so the debug dir can't grow unbounded
+        now = time.time()
+        for old in _dir.glob("flamingo_*.png"):
+            try:
+                if now - old.stat().st_mtime > 72 * 3600:
+                    old.unlink()
+            except Exception:
+                pass
+        return str(_shot)
+    except Exception:
+        return None
 
 # backend reject phrases that mean "rotate proxy, retry same email"
 ROTATE_PHRASES = [
@@ -219,6 +263,10 @@ def save_account(email, password, name, status):
     if not seen:
         kept.append(f"{email}|{password}|{name}|{status}")
     ACCOUNTS_FILE.write_text("\n".join(kept) + "\n")
+    try:
+        os.chmod(ACCOUNTS_FILE, 0o600)  # passwd file: owner-only
+    except Exception:
+        pass
 
 
 def gen_password(n=12):
@@ -339,7 +387,7 @@ def _solve_v3(api_key, provider, page_url, min_score="0.3", timeout=300):
 def _gmail_cookies_for(stem_or_email):
     """Load google-session cookies for a gmail (stem or full address)."""
     stem = stem_or_email.split("@")[0].replace(".", "_") + "_gmail_com.json"
-    raw = json.loads((Path("/root/projects/gmail-inbox/cookies") / stem).read_text())
+    raw = json.loads((_gmail_cookie_dir() / stem).read_text())
     return [{"name": c["name"], "value": c["value"], "domain": c["domain"],
              "path": c.get("path", "/"), "secure": bool(c.get("secure", True)),
              "httpOnly": bool(c.get("httpOnly", False)), "sameSite": c.get("sameSite", "Lax")}
@@ -575,8 +623,9 @@ def _gmail_password(gmail):
     """Gmail password from inbox ledgers (loggedmail.txt pipe, accounts.txt tab).
     Runtime use only — callers must NEVER log it."""
     g = gmail.strip().lower()
-    for path, sep in (("/root/projects/gmail-inbox/loggedmail.txt", "|"),
-                      ("/root/projects/gmail-inbox/accounts.txt", "\t")):
+    gh = _gmail_home()
+    for path, sep in ((str(gh / "loggedmail.txt"), "|"),
+                      (str(gh / "accounts.txt"), "\t")):
         try:
             with open(path) as f:
                 for ln in f:
@@ -734,7 +783,7 @@ def flamingo_challenge_loop(pg, gmail, max_s=300):
                 code_logged = m.group(1)
                 log(f">>> TAP {m.group(1)} ON YOUR PHONE NOW <<<", "warn")
             try:
-                pg.screenshot(path=str(BASE / "debug_shots" / f"flamingo_{gmail.split('@')[0]}_tap.png"))
+                _save_debug_shot(pg, f"flamingo_{gmail.split('@')[0]}_tap")
             except Exception:
                 pass
             continue
@@ -865,7 +914,7 @@ def flamingo_challenge_loop(pg, gmail, max_s=300):
             if human_waits >= 3:
                 log("unknown screen persists after 3 waits — giving up", "warn")
                 try:
-                    pg.screenshot(path=str(BASE / "debug_shots" / f"flamingo_{gmail.split('@')[0]}_stuck.png"))
+                    _save_debug_shot(pg, f"flamingo_{gmail.split('@')[0]}_stuck")
                 except Exception:
                     pass
                 return False
@@ -2008,6 +2057,10 @@ def save_generated(proxies, path=None):
                 f.write(line + "\n")
                 existing.add(line)
                 added += 1
+    try:
+        os.chmod(path, 0o600)  # proxy creds (user:pass) embedded: owner-only
+    except Exception:
+        pass
     return added
 
 
@@ -2171,8 +2224,10 @@ def oauth_main(args, tui):
     """OAuth farm: one Flamingo account per gmail session (DIRECT only)."""
     flag = args.oauth_gmail.strip().lower()
     if flag == "auto":
-        cdir = Path("/root/projects/gmail-inbox/cookies")
+        cdir = _gmail_cookie_dir()
         gmails = sorted(p.stem[:-len("_gmail_com")] for p in cdir.glob("*_gmail_com.json")) if cdir.exists() else []
+        if not gmails:
+            log(f"no gmail cookies in {cdir} (set GMAIL_COOKIES), trying DB", "warn")
         # stem mangling is lossy (dots->underscores); resolve via DB below
         gmails = _resolve_gmails(gmails)
     else:
@@ -2248,7 +2303,11 @@ def _resolve_gmails(stems):
     """Map cookie-file stems back to real gmail addresses via inbox DB."""
     try:
         import sqlite3
-        db = sqlite3.connect("/root/projects/gmail-inbox/inbox.db")
+        dbp = _gmail_inbox_db()
+        if not Path(dbp).exists():
+            log(f"inbox DB missing: {dbp} (set TH_MAILG_DB), no gmail fallback", "warn")
+            return []
+        db = sqlite3.connect(dbp)
         rows = db.execute("SELECT email FROM accounts ORDER BY email").fetchall()
         db.close()
         return [r[0] for r in rows]
@@ -2318,13 +2377,15 @@ def main():
     gcookies = []
     cookie_pool = []
     if args.gmail_cookie.lower() == "auto":
-        cdir = Path("/root/projects/gmail-inbox/cookies")
+        cdir = _gmail_cookie_dir()
         if cdir.exists():
             cookie_pool = sorted(cdir.glob("*_gmail_com.json"))
             log(f"cookie rotation pool: {len(cookie_pool)} gmail sessions")
+        else:
+            log(f"no cookie dir {cdir} (set GMAIL_COOKIES), continuing without v3 boost", "warn")
     elif args.gmail_cookie:
         try:
-            cf = (Path("/root/projects/gmail-inbox/cookies")
+            cf = (_gmail_cookie_dir()
                   / (args.gmail_cookie.split("@")[0].replace(".", "_") + "_gmail_com.json"))
             raw = json.loads(cf.read_text())
             gcookies = [{"name": c["name"], "value": c["value"], "domain": c["domain"],

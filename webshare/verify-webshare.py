@@ -7,14 +7,18 @@ import time
 from pathlib import Path
 import requests
 
-BASE = Path("/root/temp/token-harbor")
+BASE = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("tt", BASE / "th-tui.py")
 m = importlib.util.module_from_spec(spec)
 sys.modules["tt"] = m
 spec.loader.exec_module(m)
 m.load_env()
 
-accts = [l.split(":")[0].strip() for l in (BASE / "ws_accounts.txt").read_text().splitlines() if ":" in l]
+_accts_file = BASE / "ws_accounts.txt"
+if not _accts_file.exists():
+    print(f"ws_accounts.txt missing at {_accts_file} — nothing to verify")
+    raise SystemExit(0)
+accts = [l.split(":")[0].strip() for l in _accts_file.read_text().splitlines() if ":" in l]
 print(f"{len(accts)} accounts to check")
 
 ok = fail = none = 0

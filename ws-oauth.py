@@ -14,7 +14,10 @@ COUNT = 3
 for a in sys.argv[1:]:
     if a.isdigit(): COUNT = int(a)
 
-COOKIE_DIR = Path("/root/projects/gmail-inbox/cookies")
+COOKIE_DIR = Path(os.environ.get("GMAIL_COOKIES")
+                   or (str(Path(os.environ["GMAIL_INBOX_DIR"]) / "cookies")
+                       if os.environ.get("GMAIL_INBOX_DIR") else "")
+                   or (BASE / "cookies"))
 
 def load_proxy():
     import importlib.util as _iu
@@ -67,6 +70,10 @@ def cookie_for_email(cookie_file):
         return user + "@gmail.com"
 
 print(f"=== WebShare OAuth Signup (count={COUNT}, vnc={VNC}) ===")
+if not COOKIE_DIR.exists():
+    print(f"  ⚠️ cookie dir missing: {COOKIE_DIR} (set GMAIL_COOKIES or GMAIL_INBOX_DIR) — nothing to do")
+    print(f"\nDone: 0/{COUNT} accounts via Google OAuth")
+    raise SystemExit(0)
 print(f"Cookies dir: {COOKIE_DIR} ({len(list(COOKIE_DIR.glob('*.json')))} files)")
 
 from playwright.sync_api import sync_playwright
