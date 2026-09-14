@@ -20,6 +20,8 @@
 #                bash install.sh --skip-deps       # lewati paket sistem
 #                bash install.sh --no-venv         # pasang ke python sistem
 #                bash install.sh --python python3.11  # specify python binary
+#                bash install.sh --recreate           # wipe & rebuild .venv
+#                bash install.sh --force-deps         # paksa install paket sistem
 # ============================================================================
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -33,16 +35,23 @@ SKIP_BROWSER=0
 SKIP_DEPS=0
 NO_VENV=0
 PYTHON_BIN=""
+RECREATE=0
+FORCE_DEPS=0
+DEPS_MARKER=".deps-installed"
 
-for a in "$@"; do
-  case "$a" in
-    --skip-browser) SKIP_BROWSER=1 ;;
-    --skip-deps)    SKIP_DEPS=1 ;;
-    --no-venv)      NO_VENV=1 ;;
-    --python)       shift; PYTHON_BIN="$1"; shift ;;
-    --python=*)     PYTHON_BIN="${a#*=}" ;;
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --skip-browser) SKIP_BROWSER=1; shift ;;
+    --skip-deps)    SKIP_DEPS=1; shift ;;
+    --no-venv)      NO_VENV=1; shift ;;
+    --recreate)     RECREATE=1; shift ;;
+    --force-deps)   FORCE_DEPS=1; shift ;;
+    --python)
+      if [ $# -lt 2 ]; then echo "--python butuh argumen" >&2; exit 1; fi
+      PYTHON_BIN="$2"; shift 2 ;;
+    --python=*)     PYTHON_BIN="${1#*=}"; shift ;;
     -h|--help)      grep '^#' "$0" | head -50 | sed 's/^# \{0,2\}//'; exit 0 ;;
-    *) echo "Opsi tak dikenal: $a"; exit 1 ;;
+    *) echo "Opsi tak dikenal: $1"; exit 1 ;;
   esac
 done
 
@@ -92,7 +101,12 @@ install_system_deps() {
         log "==> [1/6] Skip paket sistem (--skip-deps)"
         return
     fi
-    
+
+    if [ "$FORCE_DEPS" -eq 0 ] && [ -f "$DEPS_MARKER" ]; then
+        log "==> [1/6] Skip paket sistem (marker $DEPS_MARKER ada; --force-deps untuk paksa)"
+        return
+    fi
+
     log "==> [1/6] Install paket sistem dasar"
     
     case "$DISTRO" in
@@ -137,6 +151,7 @@ install_system_deps() {
             brew install python@3.11 openssl readline sqlite3 xz zlib 2>/dev/null || true
         fi
     fi
+    touch "$DEPS_MARKER"
 }
 
 # ---- 3. Cari/Install Python >= 3.10 --------------------------------------
@@ -216,20 +231,31 @@ setup_venv() {
         fi
         PY_RUN="$PY"
     else
-        log "==> [3/6] Buat virtualenv (.venv) dengan $($PY -V)"
-        rm -rf "$VENV_DIR"
-        $PY -m venv "$VENV_DIR" || {
-            err "Gagal membuat virtualenv. Coba: $SUDO apt-get install python3-venv"
-            exit 1
-        }
-        
         if [ -f "$VENV_DIR/bin/python" ]; then
-            PY_RUN="$VENV_DIR/bin/python"
+            VENV_PY="$VENV_DIR/bin/python"
         elif [ -f "$VENV_DIR/Scripts/python.exe" ]; then
-            PY_RUN="$VENV_DIR/Scripts/python.exe"
+            VENV_PY="$VENV_DIR/Scripts/python.exe"
         else
-            err "Virtualenv binary tidak ditemukan"
-            exit 1
+            VENV_PY=""
+        fi
+        if [ "$RECREATE" -eq 0 ] && [ -n "$VENV_PY" ] && "$VENV_PY" -c "import sys; exit(0 if sys.version_info >= ($MIN_PY_MAJOR,$MIN_PY_MINOR) else 1)" 2>/dev/null; then
+            log "==> [3/6] Reuse virtualenv (.venv) dengan $($VENV_PY -V) (--recreate untuk wipe)"
+            PY_RUN="$VENV_PY"
+        else
+            log "==> [3/6] Buat virtualenv (.venv) dengan $($PY -V)"
+            rm -rf "$VENV_DIR"
+            $PY -m venv "$VENV_DIR" || {
+                err "Gagal membuat virtualenv. Coba: $SUDO apt-get install python3-venv"
+                exit 1
+            }
+            if [ -f "$VENV_DIR/bin/python" ]; then
+                PY_RUN="$VENV_DIR/bin/python"
+            elif [ -f "$VENV_DIR/Scripts/python.exe" ]; then
+                PY_RUN="$VENV_DIR/Scripts/python.exe"
+            else
+                err "Virtualenv binary tidak ditemukan"
+                exit 1
+            fi
         fi
         
         $PY_RUN -m pip install -q -U pip

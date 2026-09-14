@@ -128,6 +128,28 @@ except Exception:
     pass
 
 
+def _default_vnc_pw():
+    """Shared generated VNC fallback (env VNC_PASSWORD always wins).
+
+    Same file/contract as th-tui: BASE/.vnc-default-pw, 0600, never logged."""
+    try:
+        pf = BASE / ".vnc-default-pw"
+        if pf.exists():
+            pw = pf.read_text().strip()
+            if len(pw) >= 16:
+                return pw
+        import secrets as _sec
+        pw = _sec.token_urlsafe(24)
+        pf.write_text(pw)
+        try:
+            os.chmod(pf, 0o600)
+        except Exception:
+            pass
+        return pw
+    except Exception:
+        return ""
+
+
 def _ensure_vnc():
     # always set DISPLAY when VNC requested, regardless of WS_TH_NO_PROXY or other env
     if not VNC:
@@ -141,7 +163,20 @@ def _ensure_vnc():
             if _sp.call("DISPLAY=:99 xdpyinfo >/dev/null 2>&1", shell=True)==0: break
     if VNC and _sp.call("ss -ltn 2>/dev/null | grep -q :5900", shell=True)!=0:
         # start x11vnc+websockify if missing (same as th-tui stack)
-        pwf=os.environ.get("VNC_PASSWORD","") or (lambda p: p.read_text().split("VNC_PASSWORD=")[1].split("\n")[0].strip().strip("'\"") if p.exists() and "VNC_PASSWORD" in p.read_text() else "")(BASE/".env") if (BASE/".env").exists() and "VNC_PASSWORD" in open(BASE/".env").read() else "Phoe9Ceixingie5ahsah7fieruNg2eijujoofoA1apu6uwevuv8ait3ieshahh3ish"
+        pwf = os.environ.get("VNC_PASSWORD", "")
+        if not pwf and (BASE / ".env").exists():
+            try:
+                for _ln in (BASE / ".env").read_text().splitlines():
+                    _ln = _ln.strip()
+                    if _ln.startswith("VNC_PASSWORD=") and not _ln.startswith("#"):
+                        pwf = _ln.split("=", 1)[1].strip().strip("'\"")
+                        break
+            except Exception:
+                pass
+        pwf = pwf or _default_vnc_pw()
+        if not pwf:
+            _log("No VNC password available (set VNC_PASSWORD) — refusing empty auth")
+            return
         if "\n" in pwf or "\x00" in pwf:
             _log("VNC password contains newline/NUL — refusing to store")
             return

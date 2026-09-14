@@ -81,7 +81,7 @@ def free_model_ok(key):
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
             json={"model": "deepseek-v4-flash:free",
                   "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5},
-            timeout=60,
+            timeout=12,  # dry-run budget: 37 keys must fit a 75s soft deadline
         )
         if r.status_code == 200:
             return True, ""
@@ -92,6 +92,8 @@ def free_model_ok(key):
         if r.status_code == 402:
             return False, "plan-402"
         return False, f"HTTP {r.status_code}: {r.text[:80]}"
+    except requests.exceptions.Timeout:
+        return False, "timeout"
     except Exception as e:
         return False, f"err {e}"
 
@@ -171,7 +173,13 @@ def main():
 
     print(f"[+] {len(accounts)} akun. Cek status free model via API...")
     todo = []
+    t0 = time.monotonic()
+    checked = 0
     for a in accounts:
+        if args.dry_run and time.monotonic() - t0 > 75:
+            print(f"    ... deadline 75s, berhenti (partial: {checked}/{len(accounts)} checked)")
+            break
+        checked += 1
         ok, det = free_model_ok(a["key"])
         a["free_ok"] = ok
         print(f"  {'✓' if ok else '✗'} {a['email']:24s} free_model={'OK' if ok else det}")
@@ -179,7 +187,7 @@ def main():
             todo.append(a)
 
     if not todo:
-        print("\nSemua free model sudah aktif. Tidak perlu perubahan.")
+        print(f"\nSemua free model sudah aktif. Tidak perlu perubahan. (checked {checked}/{len(accounts)})")
         return 0
     print(f"\n[+] Akan enable free models utk {len(todo)} akun")
     if args.dry_run:

@@ -310,6 +310,10 @@ def save_proxies(proxies, path=PROXY_LIST):
                 f.write(line + "\n")
                 existing.add(line)
                 added += 1
+    try:
+        os.chmod(path, 0o600)  # proxy creds (user:pass) embedded: owner-only
+    except Exception:
+        pass
     return added
 
 
@@ -928,6 +932,10 @@ def create_one(vnc_mode, proxy_parsed=None, captcha_key=None, captcha_provider="
             # save account
             with open(BASE / "ws_accounts.txt", "a") as f:
                 f.write(f"{email}:{password}:{at}\n")
+            try:
+                os.chmod(BASE / "ws_accounts.txt", 0o600)  # password+token: owner-only
+            except Exception:
+                pass
             # verify in the SAME browser (before close) — opens the link with cookies/session
             log(f"Starting email verification for {email}...", "info")
             try:
@@ -1228,6 +1236,28 @@ def _env_vnc_pw():
 _VNC_OWNED = []  # Popen handles WE started (kill by PID, never bare pkill)
 
 
+def _default_vnc_pw():
+    """Shared generated VNC fallback (env VNC_PASSWORD always wins).
+
+    Same file/contract as th-tui: BASE/.vnc-default-pw, 0600, never logged."""
+    try:
+        pf = BASE / ".vnc-default-pw"
+        if pf.exists():
+            pw = pf.read_text().strip()
+            if len(pw) >= 16:
+                return pw
+        import secrets as _sec
+        pw = _sec.token_urlsafe(24)
+        pf.write_text(pw)
+        try:
+            os.chmod(pf, 0o600)
+        except Exception:
+            pass
+        return pw
+    except Exception:
+        return ""
+
+
 def _vnc_track(proc):
     try:
         _VNC_OWNED.append(proc)
@@ -1258,7 +1288,10 @@ def _start_vnc_stack():
             if line.startswith("VNC_PASSWORD=") and not line.startswith("#"):
                 vnc_pw = line.split("=", 1)[1].strip().strip("'\"")
                 break
-    auth_xs = vnc_pw or "Phoe9Ceixingie5ahsah7fieruNg2eijujoofoA1apu6uwevuv8ait3ieshahh3ish"
+    auth_xs = vnc_pw or _default_vnc_pw()
+    if not auth_xs:
+        log("No VNC password available (set VNC_PASSWORD) — refusing empty auth", "err")
+        return
     os.environ.setdefault("DISPLAY", ":99")
     # 1. Xvfb — process + display check
     if not (_sp.call("pgrep -x Xvfb >/dev/null 2>&1", shell=True) == 0):

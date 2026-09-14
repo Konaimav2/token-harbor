@@ -160,6 +160,10 @@ DI = _A + "2m"
 BD = _A + "1m"
 RS = _A + "0m"
 
+# Absolute-path defaults: overridable via env; missing paths warn + fall back, never crash.
+MAILG_DB_PATH = os.environ.get("TH_MAILG_DB", "/root/projects/gmail-inbox/inbox.db")
+CLOUDMAIL_CREDS_GLOB = os.environ.get("TH_CLOUDMAIL_CREDS_GLOB", "/root/ReiFiles/credentials/deepseek-session-*/grok-register/mail_credentials.txt")
+EFM_HERMES_PY = os.environ.get("TH_EFM_PYTHON", "/usr/local/lib/hermes-agent/venv/bin/python3")
 BASE = Path(__file__).parent.resolve()
 KEYS_FILE = BASE / "keys.txt"
 USED_FILE = BASE / "used.txt"
@@ -250,6 +254,24 @@ def elog(msg, detail="" ):
             print(f"    {DI}{line}{RS}", flush=True)
 
 
+def _rotate_log(p, mb=5242880, k=3):
+    try:
+        _p = Path(p)
+        if _p.exists() and _p.stat().st_size > mb:
+            for i in range(k, 0, -1):
+                _src = _p if i == 1 else Path(str(_p) + f".{i-1}")
+                _dst = Path(str(_p) + f".{i}")
+                try:
+                    if _src.exists():
+                        if _dst.exists():
+                            _dst.unlink()
+                        _src.rename(_dst)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 def log(msg, icon="info"):
     """Concise log — shows on CLI AND writes a line to farm.log."""
     icons = {"ok": f"{G}OK{RS}", "no": f"{R}XX{RS}", "warn": f"{Y}!{RS}",
@@ -258,6 +280,7 @@ def log(msg, icon="info"):
     # append to farm log file too (for unattended runs)
     try:
         LOG_FILE = BASE / "farm.log"
+        _rotate_log(LOG_FILE)
         with open(LOG_FILE, "a") as f:
             f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
     except Exception as _e:
@@ -270,6 +293,7 @@ def dlog(msg):
     Keeps the CLI clean while the log file has full detail."""
     try:
         LOG_FILE = BASE / "farm.log"
+        _rotate_log(LOG_FILE)
         with open(LOG_FILE, "a") as f:
             f.write(f"[{time.strftime('%H:%M:%S')}]   > {msg}\n")
     except Exception as _e:
@@ -447,6 +471,7 @@ def raw_end():
 def _kdump(c, tag):
     """Debug-log a raw byte to _key_debug.log (hex)."""
     try:
+        _rotate_log(BASE / "_key_debug.log")
         with open(BASE / "_key_debug.log", "a") as _f:
             _f.write(f"{tag}: {c!r} hex={c.encode('utf-8','replace').hex() if c else 'empty'} at {time.time():.2f}\n")
     except Exception as _e:
@@ -943,7 +968,10 @@ def mark_used(e):
 # ---- mail sources ----
 def get_mailg_accounts():
     try:
-        db = sqlite3.connect("/root/projects/gmail-inbox/inbox.db")
+        if not os.path.isfile(MAILG_DB_PATH):
+            log(f"mailg DB missing: {MAILG_DB_PATH} (set TH_MAILG_DB), skipping", "warn")
+            return []
+        db = sqlite3.connect(MAILG_DB_PATH)
         accs = [r[0] for r in db.execute("SELECT email FROM accounts ORDER BY email")]
         db.close()
         return accs
@@ -961,7 +989,9 @@ def get_cloudmail_addresses():
     em = []
     # 1. from credentials file
     try:
-        files = glob("/root/ReiFiles/credentials/deepseek-session-*/grok-register/mail_credentials.txt")
+        files = glob(CLOUDMAIL_CREDS_GLOB)
+        if not files:
+            log(f"no cloudmail creds at {CLOUDMAIL_CREDS_GLOB} (set TH_CLOUDMAIL_CREDS_GLOB), trying API", "warn")
         for cred_file in files:
             for l in open(cred_file):
                 p = l.strip().split("\t")
@@ -1624,9 +1654,11 @@ _LOCAL_PROXY_READY = False
 # "google-chrome" is stat'ed literally (./google-chrome) and always fails
 # with `executable doesn't exist at google-chrome`. Always absolute.
 _BROWSER_CANDIDATES = [
+    p for p in os.environ.get("TH_BROWSER_CANDIDATES", "").split(os.pathsep) if p
+] or [
     "/usr/bin/google-chrome",
     "/usr/bin/google-chrome-stable",
-    "/opt/google/chrome/google-chrome",
+    os.environ.get("TH_CHROME_PATH", "/opt/google/chrome/google-chrome"),
     "/usr/bin/chromium-browser",
     "/usr/bin/chromium",
 ]
@@ -1766,8 +1798,7 @@ def preflight_browser(log_it=True, headless=True):
     if log_it:
         elog("browser preflight failed: no bundled chromium and no host "
              "chrome/chromium found (checked own ms-playwright cache, $PATH "
-             "google-chrome/chromium, /usr/bin/google-chrome, "
-             "/opt/google/chrome/google-chrome). Tried one-time "
+             "google-chrome/chromium, " + ", ".join(_BROWSER_CANDIDATES) + "). Tried one-time "
              "`playwright install chromium` (mirror " + _PW_MIRROR + "). "
              "Set CHROME_PATH=/abs/path to override. "
              "Refusing to burn proxies/emails.")
@@ -2561,6 +2592,29 @@ def _env_vnc_pw():
     return ""
 
 
+def _default_vnc_pw():
+    """Shared generated VNC fallback (env VNC_PASSWORD always wins).
+
+    Replaces the old hardcoded default. Generated once, persisted 0600 at
+    BASE/.vnc-default-pw so all tools on this host agree. Never logged."""
+    try:
+        pf = BASE / ".vnc-default-pw"
+        if pf.exists():
+            pw = pf.read_text().strip()
+            if len(pw) >= 16:
+                return pw
+        import secrets as _sec
+        pw = _sec.token_urlsafe(24)
+        pf.write_text(pw)
+        try:
+            os.chmod(pf, 0o600)
+        except Exception:
+            pass
+        return pw
+    except Exception:
+        return ""
+
+
 def _start_vnc_stack():
     """Ensure Xvfb(:99) + x11vnc(5900) + websockify(6080) are running for headed mode.
     Non-blocking; each component started only if its port/process is missing."""
@@ -2569,7 +2623,10 @@ def _start_vnc_stack():
     vnc_pw = os.environ.get("VNC_PASSWORD", "") or _env_vnc_pw()
     if not VNC_PASSWORD:
         VNC_PASSWORD = vnc_pw  # keep global in sync
-    auth_xs = vnc_pw or "Phoe9Ceixingie5ahsah7fieruNg2eijujoofoA1apu6uwevuv8ait3ieshahh3ish"
+    auth_xs = vnc_pw or _default_vnc_pw()
+    if not auth_xs:
+        elog("No VNC password available (set VNC_PASSWORD) — refusing empty auth")
+        return
     os.environ.setdefault("DISPLAY", ":99")
     # 1. Xvfb — process + display check
     if not (_sp.call("pgrep -x Xvfb >/dev/null 2>&1", shell=True) == 0):
@@ -3802,7 +3859,7 @@ def _efm_python():
     except Exception as _e:
         print(f"[swallow th-tui.py:2744] {_e}")
         pass
-    for py in ["/usr/local/lib/hermes-agent/venv/bin/python3", "/usr/bin/python3", "python3"]:
+    for py in [EFM_HERMES_PY, "/usr/bin/python3", "python3"]:
         try:
             p = _sh.which(py) or py
             import subprocess as _sp
@@ -5185,9 +5242,15 @@ def menu_proxy(c):
             first_live = 0
             first_fail = 0
             done = 0
-            with _cf.ThreadPoolExecutor(max_workers=first_workers) as _ex:
+            clear_stop()
+            _px_old = signal.signal(signal.SIGINT, _batch_sigint_handler)
+            _ex = _cf.ThreadPoolExecutor(max_workers=first_workers)
+            _futs = {}
+            try:
                 _futs = {_ex.submit(_chk, _p, 15): _p for _p in prox}
                 for _f in _cf.as_completed(_futs):
+                    if STOP_EVENT.is_set() or _BATCH_INTERRUPT:
+                        raise KeyboardInterrupt
                     try:
                         r = _f.result()
                     except Exception as e:
@@ -5203,6 +5266,19 @@ def menu_proxy(c):
                     else:
                         first_fail += 1
                     _proxy_check_progress("Pass 1", done, len(prox), first_live, first_fail)
+            except KeyboardInterrupt:
+                for _fut in list(_futs):
+                    _fut.cancel()
+                _ex.shutdown(wait=False, cancel_futures=True)
+                signal.signal(signal.SIGINT, _px_old)
+                clear_stop()
+                _proxy_check_progress_end()
+                log("Proxy check cancelled", "warn")
+                raw_input("  " + DI + "Press Enter" + RS)
+                continue
+            _ex.shutdown(wait=True)
+            signal.signal(signal.SIGINT, _px_old)
+            clear_stop()
             _proxy_check_progress_end()
 
             live = [r[:6] for r in first if r[1] is not None]
@@ -5216,9 +5292,15 @@ def menu_proxy(c):
                 retry_workers = max(1, min(64, retry_workers_cfg, len(failed_once)))
                 log(f"Retrying {len(failed_once)} failures ({retry_workers} workers, 25s timeout)...", "info")
                 done = rec_n = dead_n = 0
-                with _cf.ThreadPoolExecutor(max_workers=retry_workers) as _ex:
+                clear_stop()
+                _px_old = signal.signal(signal.SIGINT, _batch_sigint_handler)
+                _ex = _cf.ThreadPoolExecutor(max_workers=retry_workers)
+                _futs = {}
+                try:
                     _futs = {_ex.submit(_chk, _p, 25): _p for _p in failed_once}
                     for _f in _cf.as_completed(_futs):
+                        if STOP_EVENT.is_set() or _BATCH_INTERRUPT:
+                            raise KeyboardInterrupt
                         try:
                             r = _f.result()
                         except Exception as e:
@@ -5235,6 +5317,19 @@ def menu_proxy(c):
                             dead_proxies.append(r[0])
                             dead_n += 1
                         _proxy_check_progress("Retry", done, len(failed_once), rec_n, dead_n)
+                except KeyboardInterrupt:
+                    for _fut in list(_futs):
+                        _fut.cancel()
+                    _ex.shutdown(wait=False, cancel_futures=True)
+                    signal.signal(signal.SIGINT, _px_old)
+                    clear_stop()
+                    _proxy_check_progress_end()
+                    log("Proxy check cancelled", "warn")
+                    raw_input("  " + DI + "Press Enter" + RS)
+                    continue
+                _ex.shutdown(wait=True)
+                signal.signal(signal.SIGINT, _px_old)
+                clear_stop()
                 _proxy_check_progress_end()
                 live.extend(recovered)
 
@@ -5258,6 +5353,7 @@ def menu_proxy(c):
 
             # One bulk detail block in farm.log, useful when distinguishing residential sessions.
             try:
+                _rotate_log(BASE / "farm.log")
                 with open(BASE / "farm.log", "a") as _lf:
                     _lf.write(f"[{time.strftime('%H:%M:%S')}] PROXY CHECK DETAIL ({len(prox)} total)\n")
                     for _p, _lat, _ip, _h, _pt, _rg in sorted(live, key=lambda r: str(r[0])):
@@ -5372,9 +5468,27 @@ def menu_proxy(c):
                 st = _sp.run(["pgrep", "-f", "lite_manager.py"], capture_output=True, text=True)
                 running = st.returncode == 0
                 action = "stop" if running else "start"
-                r = _sp.run(["bash", str(start_script), action], capture_output=True, text=True, timeout=60)
-                log(("Stopped proxy-controller" if action == "stop" else "Started proxy-controller"), "ok")
-                print("  " + (r.stdout or "").replace("\n", "\n  "))
+                clear_stop()
+                _px_old = signal.signal(signal.SIGINT, _batch_sigint_handler)
+                try:
+                    _proc = _sp.Popen(["bash", str(start_script), action],
+                                      stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True)
+                    try:
+                        _out, _ = _proc.communicate(timeout=60)
+                    except KeyboardInterrupt:
+                        _proc.terminate()
+                        try:
+                            _proc.wait(timeout=5)
+                        except Exception:
+                            _proc.kill()
+                        raise
+                    log(("Stopped proxy-controller" if action == "stop" else "Started proxy-controller"), "ok")
+                    print("  " + (_out or "").replace("\n", "\n  "))
+                except KeyboardInterrupt:
+                    log("proxy-ctrl cancelled", "warn")
+                finally:
+                    signal.signal(signal.SIGINT, _px_old)
+                    clear_stop()
             except Exception as e:
                 elog("run proxy-ctrl: " + str(e))
             raw_input("  " + DI + "Press Enter" + RS)

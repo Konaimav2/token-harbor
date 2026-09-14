@@ -27,10 +27,9 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import grok  # noqa: E402
+# NOTE: grok + camoufox are LAZY (imported after the --dry-run gate / inside
+# the browser fn). Top-level imports broke --dry-run with ModuleNotFoundError.
 import requests  # noqa: E402
-
-from camoufox.sync_api import Camoufox  # noqa: E402
 
 KEYS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "keys.txt")
 KEY_RE = re.compile(r"thk_live_[A-Za-z0-9_-]{20,}")
@@ -79,12 +78,6 @@ def mailtm_token(email, password):
     r = requests.post(f"{MAIL_TM}/token",
                       json={"address": email, "password": password}, timeout=15)
     if r.status_code != 200:
-        # coba password alternatif
-        for alt in ("Jancok1927",):
-            r = requests.post(f"{MAIL_TM}/token",
-                              json={"address": email, "password": alt}, timeout=15)
-            if r.status_code == 200:
-                return r.json()["token"], alt
         return None, password
     return r.json()["token"], password
 
@@ -133,6 +126,7 @@ def fetch_verify_link(email, password):
 
 def verify_link_via_browser(link):
     """Buka link verify di camoufox sampai redirect verify=success."""
+    from camoufox.sync_api import Camoufox
     with Camoufox(headless=True) as browser:
         ctx = browser.new_context()
         page = ctx.new_page()
@@ -167,7 +161,8 @@ def main():
     ap.add_argument("--file", default=KEYS_FILE)
     ap.add_argument("--all", action="store_true", help="tes semua akun, bukan hanya 403")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--router-base", default=grok.ROUTER_BASE)
+    ap.add_argument("--router-base", default="http://localhost:20128",
+                      help="9router base URL (mirror of config/grok.py ROUTER_BASE)")
     ap.add_argument("--retest-router", action="store_true",
                     help="re-test koneksi di 9router setelah key valid")
     args = ap.parse_args()
@@ -197,6 +192,7 @@ def main():
         print("    (dry-run, tidak ada perubahan)")
         return 0
 
+    import grok  # lazy: only the live path needs router auth
     token = grok.generate_router_token()
     # peta koneksi 9router: nama -> id (untuk re-test)
     conn_by_name = {}

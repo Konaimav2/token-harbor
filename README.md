@@ -23,6 +23,7 @@ Full-stack account farming + proxy management toolkit for **TokenHarbor**, **9ro
 ```bash
 # 1. Install dependencies (one-shot)
 bash install.sh
+# Flags: --skip-browser --skip-deps --no-venv --python=* / --python BIN --recreate --force-deps
 
 # 2. Configure credentials
 cp .env.example .env
@@ -154,7 +155,7 @@ C=Create E=Pick #=Active A=Add D=Del T=Toggle U=Temp F=Search B=Back
 ### 6. Proxy
 ```
 1. Status         ON/OFF
-2. Mode           List / VPNGate / Combo (local+list)
+2. Mode           List / VPNGate / Combo (local+list) / Egress (machine IPs)
 3. Proxy Order    Top / Random / Least Used
 4. No Delete      keep ALL failed proxies
 5. Proxies        total count, protocol count
@@ -168,6 +169,11 @@ L. Add local      proxy-controller :7920/:8118
 R. Run proxy-ctrl start/stop bundled
 M. Manual proxy   set a locked proxy that overrides auto-check
 ```
+
+Egress mode (`egress.py`, TUI Proxy mode `Egress`): one localhost forward proxy per
+machine IPv4 (`http://127.0.0.1:18091+`, state `proxy/egress.json`, pidfile
+`proxy/egress.pid`, 127.0.0.1-only, no auth). Stale state fails closed
+(unverified port mapping returns no IP).
 
 ---
 
@@ -206,7 +212,7 @@ python3 th-flamingo.py [options]
 | `--vnc` | headed browser (debug) |
 
 ### import/import_tokenharbor.py
-Import verified keys from keys.txt to a 9router instance.
+Import verified keys from `import/keys.txt` (`$KEYS_FILE` override) to a 9router instance.
 
 ```bash
 python3 import/import_tokenharbor.py [options]
@@ -214,7 +220,7 @@ python3 import/import_tokenharbor.py [options]
 
 | Option | Description |
 |--------|-------------|
-| `--file PATH` | keys file (default `data/keys.txt`) |
+| `--file PATH` | keys file (default `import/keys.txt`, `$KEYS_FILE` override) |
 | `--router-base URL` | 9router base URL |
 | `--router-password PW` | remote 9router password (auth_mode=password) |
 | `--provider NODE_ID` | specific provider node to import into |
@@ -264,8 +270,12 @@ python3 th-webshare.py [options]
 | `--count N` | number of accounts to register (default 1) |
 | `--vnc` | visible browser, auto solver (does NOT pause for manual solve) |
 | `--vnc-manual` | visible browser + pause for human captcha solve |
-| `--cleanup-vnc` | kill leftover Xvfb/Chromium on exit (frees :99) |
+| `--cleanup-vnc` | teardown Xvfb/x11vnc/websockify on exit (frees :99); without it only own Chromium leftovers are killed |
 | `--vnc-auto` | headed browser, fully automatic solving |
+
+> VNC stack is PID-tracked (`_VNC_OWNED` — kill by PID, narrowed pkill patterns, atexit
+> cleanup). VNC password: `VNC_PASSWORD` env wins, else a generated secret persisted 0600 at
+> `.vnc-default-pw` (never logged; `shutil.which("websockify")` fallback in oauth flow).
 | `--proxy URL` | proxy for registration |
 | `--captcha-key KEY` | 2captcha API key |
 | `--captcha-provider NAME` | captcha provider (default 2captcha) |
@@ -312,6 +322,7 @@ python3 th-proxy.py
 
 ### tools/enable_free_models.py
 Enable free-model consent for accounts (logs into dashboard, clicks consent).
+Reads `data/keys.json` keystore first, legacy pipe files as fallback.
 
 ```bash
 PYTHONPATH=config:tools python3 tools/enable_free_models.py [--email user@x.com] [--all] [--dry-run] [--file keys.txt]

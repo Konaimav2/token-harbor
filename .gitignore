@@ -5,6 +5,7 @@
 config.json
 !config.json.example
 keys.txt
+keys.json
 used.txt
 imported.txt
 email-blacklist.txt

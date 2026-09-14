@@ -6,7 +6,7 @@ md5 list can't say WHICH key or WHEN, and concurrent read-modify-writes lose
 records. This store keeps one record per email:
 
   {email, password, api_key, status, imported, imported_at, connection_id,
-   fingerprint, updated_at}
+   fingerprint, used, used_at, deleted, deleted_at, updated_at}
 
 - imported flag survives Ctrl+C mid-import (set per key, right after POST).
 - atomic writes (tmp + fsync + os.replace) under an fcntl lock.
@@ -26,6 +26,7 @@ BASE = Path(__file__).resolve().parent
 DATA_DIR = BASE / "data"
 JSON_PATH = DATA_DIR / "keys.json"
 LEGACY_KEYS = BASE / "keys.txt"          # symlink -> data/keys.txt on farm hosts
+LEGACY_USED = BASE / "used.txt"          # symlink -> data/used.txt (TUI dedup ledger)
 LEGACY_IMPORTED = BASE / "import" / "imported.txt"
 LEGACY_IMPORTED2 = BASE / "data" / "imported.txt"
 LEGACY_CHECKS = BASE / "key-checks.json"
@@ -44,6 +45,7 @@ def _blank(email=""):
     return {"email": email, "password": "", "api_key": "",
             "status": "pending", "imported": False, "imported_at": 0,
             "connection_id": "", "fingerprint": "",
+            "used": False, "used_at": 0, "deleted": False, "deleted_at": 0,
             "health": {"state": "", "reason": "", "checked_at": 0},
             "updated_at": _now()}
 
@@ -117,7 +119,12 @@ class KeyStore:
                 self._quarantine(f"unparseable: {e}")
             if isinstance(data, list):
                 with self:
+                    changed = self._backfill_flags(data)
+                    if self._fold_used_txt(data):
+                        changed = True
                     if self._backfill_health(data):
+                        changed = True
+                    if changed:
                         self.save(data)
                 return data
             if data is not None:
@@ -126,6 +133,50 @@ class KeyStore:
         with self:
             self.save(recs)
         return recs
+
+    def _backfill_flags(self, recs):
+        """Default used/deleted flags on old records. Returns changed."""
+        changed = False
+        for r in recs:
+            for k, v in (("used", False), ("used_at", 0),
+                         ("deleted", False), ("deleted_at", 0)):
+                if k not in r:
+                    r[k] = v
+                    changed = True
+        return changed
+
+    def _used_addrs(self):
+        """Legacy used.txt ledger -> set of emails (follows symlinks once)."""
+        seen_files, addrs = set(), set()
+        for cand in (LEGACY_USED, DATA_DIR / "used.txt"):
+            try:
+                real = os.path.realpath(cand)
+                if real in seen_files:
+                    continue
+                seen_files.add(real)
+                for ln in self._read_lines(cand):
+                    e = ln.strip().split("|")[0].strip().lower()
+                    if "@" in e:
+                        addrs.add(e)
+            except Exception:
+                pass
+        return addrs
+
+    def _fold_used_txt(self, recs):
+        """Fold legacy used.txt into used flags (dedupe ledger). Returns changed."""
+        try:
+            addrs = self._used_addrs()
+            if not addrs:
+                return False
+            changed = False
+            for r in recs:
+                if r.get("email", "").lower() in addrs and not r.get("used"):
+                    r["used"], r["used_at"] = True, _now()
+                    r["updated_at"] = _now()
+                    changed = True
+            return changed
+        except Exception:
+            return False
 
     def _backfill_health(self, recs):
         """Fold key-checks.json into records missing health. Returns changed."""
@@ -261,6 +312,11 @@ class KeyStore:
                             "imported": bool(fp and fp in imported_md5),
                             "fingerprint": fp})
                 recs.append(rec)
+        # fold legacy used.txt dedup ledger into used flags
+        try:
+            self._fold_used_txt(recs)
+        except Exception:
+            pass
         # fold in key-checks.json health cache (email+fingerprint match)
         try:
             checks = {}
@@ -291,19 +347,23 @@ class KeyStore:
             pass
         return recs
 
-    def _write_legacy_mirror(self, records):
+    def _write_legacy_mirror(self, records, include_used=False, include_deleted=False):
         """Regenerate pipe-delimited keys.txt for legacy readers (best effort).
 
         Passwords containing '|' are sanitized to '_' in the mirror only —
-        the JSON record keeps the real value.
+        the JSON record keeps the real value. Used/deleted rows hidden by
+        default (restorable via flags).
         """
         try:
             targets = {DATA_DIR / "keys.txt"}
-            if LEGACY_KEYS.is_symlink():
-                return  # mirror IS data/keys.txt already
-            targets.add(LEGACY_KEYS)
+            if not LEGACY_KEYS.is_symlink():
+                targets.add(LEGACY_KEYS)
             lines = []
             for r in records:
+                if not include_used and r.get("used"):
+                    continue
+                if not include_deleted and r.get("deleted"):
+                    continue
                 pw = str(r.get("password", "")).replace("|", "_").replace("\n", "")
                 lines.append("|".join([r.get("email", ""), pw,
                                        r.get("api_key", ""), r.get("status", "pending")]))
@@ -319,6 +379,10 @@ class KeyStore:
                     except Exception:
                         pass
                 os.replace(tmp, Path(os.path.realpath(t)))
+                try:
+                    os.chmod(os.path.realpath(t), 0o600)  # passwords+api_keys: owner-only
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -379,13 +443,60 @@ class KeyStore:
                 self.save(recs)
             return changed
 
-    def pending_import(self):
-        """Records with a key not yet flagged imported."""
+    def list(self, include_used=False, include_deleted=False):
+        """All records; used/deleted hidden by default but restorable."""
         return [r for r in self.load()
-                if r.get("api_key", "").startswith("thk_") and not r.get("imported")]
+                if (include_used or not r.get("used"))
+                and (include_deleted or not r.get("deleted"))]
 
-    def stats(self):
-        recs = self.load()
+    def show(self, include_used=False, include_deleted=False):
+        return self.list(include_used=include_used, include_deleted=include_deleted)
+
+    def mark_used(self, email):
+        with self:
+            recs = self.load()
+            for r in recs:
+                if r.get("email", "").lower() == (email or "").strip().lower():
+                    r["used"], r["used_at"] = True, _now()
+                    r["updated_at"] = _now()
+                    self.save(recs)
+                    return True
+            return False
+
+    def soft_delete(self, email):
+        """Flag deleted (never drops rows)."""
+        with self:
+            recs = self.load()
+            for r in recs:
+                if r.get("email", "").lower() == (email or "").strip().lower():
+                    r["deleted"], r["deleted_at"] = True, _now()
+                    r["updated_at"] = _now()
+                    self.save(recs)
+                    return True
+            return False
+
+    def restore(self, email):
+        """Clear used + deleted flags."""
+        with self:
+            recs = self.load()
+            for r in recs:
+                if r.get("email", "").lower() == (email or "").strip().lower():
+                    r["used"], r["used_at"] = False, 0
+                    r["deleted"], r["deleted_at"] = False, 0
+                    r["updated_at"] = _now()
+                    self.save(recs)
+                    return True
+            return False
+
+    def pending_import(self, include_used=False, include_deleted=False):
+        """Records with a key not yet flagged imported (used/deleted hidden by default)."""
+        return [r for r in self.load()
+                if r.get("api_key", "").startswith("thk_") and not r.get("imported")
+                and (include_used or not r.get("used"))
+                and (include_deleted or not r.get("deleted"))]
+
+    def stats(self, include_used=False, include_deleted=False):
+        recs = self.list(include_used=include_used, include_deleted=include_deleted)
         return {"total": len(recs),
                 "imported": sum(1 for r in recs if r.get("imported")),
                 "with_key": sum(1 for r in recs if r.get("api_key", "").startswith("thk_"))}
