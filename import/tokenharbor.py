@@ -38,7 +38,8 @@ if sys.version_info < MIN_PY:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import grok  # noqa: E402
 
-from camoufox.sync_api import Camoufox  # noqa: E402
+# NOTE: camoufox import is LAZY inside _launch_browser (missing binary must not
+# kill --help / dry paths, and TH_USE_PLAYWRIGHT=1 bypasses it entirely).
 
 BASE = "https://tokenharbor.ai"
 SITEKEY = "0x4AAAAAADBuC8Knz1EJZx9-"
@@ -376,6 +377,8 @@ def signup(page, email, password, via_proxy=False):
             pass
 
     page.on("response", _on_response)
+    # slow-host tolerance: farm boxes under load need longer page budgets
+    _page_to = int(os.environ.get("TH_PAGE_TIMEOUT", "30000"))
     for attempt in range(3):
         holder, th = _solve_turnstile_async(SITEKEY, f"{BASE}/login?mode=signup")
 
@@ -384,7 +387,7 @@ def signup(page, email, password, via_proxy=False):
                 return "error"
         else:
             try:
-                page.goto(f"{BASE}/login?mode=signup", wait_until="domcontentloaded", timeout=30000)
+                page.goto(f"{BASE}/login?mode=signup", wait_until="domcontentloaded", timeout=_page_to)
             except Exception as e:
                 print(f"    [!] gagal buka halaman login (attempt {attempt + 1}): {str(e)[:80]}")
                 continue
@@ -670,6 +673,38 @@ def create_account(browser, label, via_proxy=False):
     return {"email": email, "password": password, "api_key": api_key or "", "status": status}
 
 
+def _launch_browser(headless=True):
+    """Camoufox preferred; Playwright-chromium fallback when TH_USE_PLAYWRIGHT=1
+    (offline hosts where the Camoufox binary cannot be fetched). Both expose
+    new_context()/close() so callers stay unchanged."""
+    if os.environ.get("TH_USE_PLAYWRIGHT") != "1":
+        from camoufox.sync_api import Camoufox
+        return Camoufox(headless=headless)
+    from playwright.sync_api import sync_playwright
+    _pw = sync_playwright().start()
+    # slim flags: farm hosts are RAM-tight (multi-GB saved vs zygote default)
+    # Proven recipe on RAM-tight farm hosts (re-verify with /tmp/pwmin.py if
+    # launch misbehaves): headless-shell + single-process. Full-build channel
+    # and default process model hang here; do not "upgrade" without proof.
+    _br = _pw.chromium.launch(headless=headless, args=[
+        "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+        "--single-process", "--no-zygote", "--disable-extensions",
+        "--disable-quic",  # VPS UDP blackhole stalls QUIC→TCP fallback for minutes
+    ])
+    _orig_close = _br.close
+
+    def _close():
+        try:
+            _orig_close()
+        finally:
+            try:
+                _pw.stop()
+            except Exception:
+                pass
+    _br.close = _close
+    return _br
+
+
 def main():
     ap = argparse.ArgumentParser(description="Auto-signup tokenharbor.ai + buat API key (cepat)")
     ap.add_argument("-c", "--count", type=int, default=1, help="jumlah akun (default 1)")
@@ -693,7 +728,7 @@ def main():
     results = []
 
     def _create_one(_idx):
-        with Camoufox(headless=True) as _browser:
+        with _launch_browser(headless=True) as _browser:
             return create_account(_browser, args.label, via_proxy=args.proxy)
 
     if args.threads > 1:
@@ -712,9 +747,13 @@ def main():
                 _line = f"{_res['email']}|{_res['password']}|{_res['api_key']}|{_res['status']}"
                 with open(OUTPUT_FILE, "a", encoding="utf-8") as _of:
                     _of.write(_line + "\n")
+                try:
+                    os.chmod(OUTPUT_FILE, 0o600)  # passwords+api_keys: owner-only
+                except Exception:
+                    pass
                 print(f"    SAVED: {_line}")
     else:
-        with Camoufox(headless=True) as browser:
+        with _launch_browser(headless=True) as browser:
             for i in range(args.count):
                 print(f"\n=== akun {i + 1}/{args.count} ===")
                 res = create_account(browser, args.label, via_proxy=args.proxy)
@@ -722,6 +761,10 @@ def main():
                 line = f"{res['email']}|{res['password']}|{res['api_key']}|{res['status']}"
                 with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
                     f.write(line + "\n")
+                try:
+                    os.chmod(OUTPUT_FILE, 0o600)  # passwords+api_keys: owner-only
+                except Exception:
+                    pass
                 print(f"    SAVED: {line}")
 
                 if res["status"] in ("blocked", "ratelimited"):
