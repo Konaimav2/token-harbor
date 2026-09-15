@@ -3104,6 +3104,24 @@ def create_account(c, email=None, password=None, _retry=True):
                         b.close()
                         return None
                 else:
+                    # dashboard URL but body still loading (SPA): the account WAS
+                    # created — settle then capture the key instead of bailing.
+                    # (Proven live: arraffifreeam registered while body=loading.)
+                    if "dashboard" in url_now or "api-keys" in url_now:
+                        dlog(f"Dashboard URL with loading body — waiting settle for {email}")
+                        try:
+                            pg.wait_for_load_state("networkidle", timeout=20000)
+                        except Exception:
+                            pass
+                        time.sleep(3)
+                        _rk = _create_and_capture_key(pg, _hz, pw_timeout_ms, email)
+                        if _rk:
+                            dlog(f"Key captured after settle for {email}")
+                            b.close()
+                            return {"email": email, "password": password, "api_key": _rk, "verified": True}
+                        dlog(f"No key after settle for {email} — treating as created-unverified")
+                        b.close()
+                        return {"email": email, "password": password, "api_key": "", "verified": False}
                     _why_signup = _explain_signup_fail('', url_now, body[:120])
                     _api = _api_errors[-1] if _api_errors else 'none'
                     elog(f"signup unexpected: {_why_signup} | api={_api} | page={body[:100]}")
