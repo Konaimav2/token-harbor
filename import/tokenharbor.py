@@ -782,6 +782,11 @@ def _launch_browser(headless=True):
         headless = False  # headed full build via Xvfb :99 (native auto-pass needs it)
     from playwright.sync_api import sync_playwright
     _pw = sync_playwright().start()
+    _launch_kw = {}
+    _th_proxy = os.environ.get("TH_PROXY", "")
+    if _th_proxy:
+        # route browser via egress/farm proxy (alt machine IP when .16 flagged)
+        _launch_kw["proxy"] = {"server": _th_proxy}
     # slim flags: farm hosts are RAM-tight (multi-GB saved vs zygote default)
     # Proven recipe on RAM-tight farm hosts (re-verify with /tmp/pwmin.py if
     # launch misbehaves): headless-shell + single-process. Full-build channel

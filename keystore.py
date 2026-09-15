@@ -515,6 +515,16 @@ def store(path=None):
 
 if __name__ == "__main__":
     import sys
+    if "--backup" in sys.argv:
+        import time as _t
+        dst = BACKUP_DIR / f"keys.json.manual-{_t.strftime('%Y%m%d_%H%M%S')}"
+        try:
+            BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(Path(sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else JSON_PATH).read_bytes())
+            print(f"backup -> {dst}")
+        except Exception as e:
+            print(f"backup gagal: {e}")
+        raise SystemExit(0)
     ks = store(sys.argv[1] if len(sys.argv) > 1 else None)
     st = ks.stats()
     print(f"keys.json: {st['total']} records, {st['with_key']} with keys, "
