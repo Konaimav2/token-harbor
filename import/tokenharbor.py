@@ -47,16 +47,32 @@ OUTPUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "keys.txt
 
 INIT = """
 (() => {
-  let wrapped = false;
+  // HOOK (not neuter): let the widget mount normally so Cloudflare can mint
+  // its own token (native auto-pass, $0). We only observe: record render
+  // calls + wrap the React callback to stash the token. External inject
+  // still works — calling __thCb(tok) reaches the ORIGINAL React callback.
+  let hooked = false;
   const iv = setInterval(() => {
-    if (wrapped) { clearInterval(iv); return; }
+    if (hooked) { clearInterval(iv); return; }
     const ts = window.turnstile;
     if (ts && typeof ts.render === 'function') {
-      wrapped = true;
-      window.turnstile = {
-        render(el, opts) { window.__thCb = opts.callback; window.__thAction = opts.action; return undefined; },
-        execute: ts.execute, load: ts.load, reset: ts.reset,
-        getResponse: ts.getResponse,
+      hooked = true;
+      const origRender = ts.render.bind(ts);
+      window.__thCalls = [];
+      window.__thFired = false;
+      window.__thToken = '';
+      ts.render = function(el, opts) {
+        try {
+          window.__thCalls.push({action: (opts || {}).action || ''});
+          const origCb = opts && opts.callback;
+          window.__thCb = function(t) {
+            try { window.__thToken = t || ''; window.__thFired = true; } catch (e) {}
+            if (typeof origCb === 'function') return origCb(t);
+          };
+          window.__thAction = (opts || {}).action;
+          if (opts) opts = Object.assign({}, opts, {callback: window.__thCb});
+        } catch (e) {}
+        return origRender(el, opts);
       };
     }
   }, 10);
@@ -181,6 +197,31 @@ def _enable_free_models_modal(page, timeout=8000):
     return False
 
 
+def _click_turnstile_checkbox(page):
+    """Click the Turnstile checkbox inside its Cloudflare iframe (human-like).
+
+    Only meaningful headed — headless-shell clicks never clear the challenge.
+    Best effort: hover, small jitter, click center of the widget box."""
+    try:
+        frames = page.locator('iframe[src*="challenges.cloudflare"]')
+        if not frames.count():
+            return False
+        box = frames.first.bounding_box(timeout=8000)
+        if not box:
+            return False
+        cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+        page.mouse.move(cx - 30, cy + 12)
+        page.wait_for_timeout(400)
+        page.mouse.move(cx, cy, steps=6)
+        page.wait_for_timeout(300)
+        page.mouse.click(cx, cy)
+        print("    [native] checkbox clicked, menunggu hasil...")
+        return True
+    except Exception as e:
+        print(f"    [native] checkbox click gagal: {str(e)[:60]}")
+        return False
+
+
 def _capture_turnstile(page, timeout=15):
     """Tunggu sampai callback turnstile tertangkap oleh wrapper init-script."""
     deadline = time.time() + timeout
@@ -218,16 +259,22 @@ def _wait_dashboard(page, timeout=15000):
 
 
 def _solve_turnstile_async(sitekey, page_url, timeout=120):
-    """Solve turnstile BYCF di thread terpisah (paralel dengan navigasi).
+    """Solve turnstile di thread terpisah (paralel dengan navigasi).
 
+    Chain: JH-Solver (free, cepat) -> BYCF -> camoufox lokal (di grok).
     Return dict dengan kunci 'tok' atau 'err' setelah thread selesai.
     """
     holder = {}
 
     def _run():
         try:
-            holder["tok"] = grok.solve_turnstile_bycf(
-                sitekey=sitekey, page_url=page_url, timeout=timeout)
+            try:
+                holder["tok"] = grok.solve_turnstile_jh(
+                    sitekey=sitekey, page_url=page_url, timeout=timeout)
+            except Exception as e:
+                print(f"    [...] JH gagal ({str(e)[:70]}), fallback BYCF")
+                holder["tok"] = grok.solve_turnstile_bycf(
+                    sitekey=sitekey, page_url=page_url, timeout=timeout)
         except Exception as e:
             holder["err"] = str(e)
 
@@ -379,6 +426,57 @@ def signup(page, email, password, via_proxy=False):
     page.on("response", _on_response)
     # slow-host tolerance: farm boxes under load need longer page budgets
     _page_to = int(os.environ.get("TH_PAGE_TIMEOUT", "30000"))
+
+    # NATIVE-FIRST (own solver, $0): submit bare so the managed challenge runs
+    # in-browser. In a clean browser Cloudflare mints the token itself and
+    # fires our hooked callback — no external service. Falls through to the
+    # external-token loop below when native doesn't pass.
+    try:
+        page.goto(f"{BASE}/login?mode=signup", wait_until="domcontentloaded", timeout=_page_to)
+        _native_ok = False
+        if _wait_selector(page, 'input[name="email"]', timeout=15000):
+            try:
+                page.fill('input[name="email"]', email)
+                page.fill('input[name="password"]', password)
+                page.click('button[type="submit"]', timeout=4000)
+            except Exception as e:
+                print(f"    [native] submit gagal: {str(e)[:80]}")
+            else:
+                print("    [native] submitted bare, menunggu 75s (dashboard/token)...")
+                _tried_cb_click = False
+                t_end = time.time() + 75
+                while time.time() < t_end:
+                    if _wait_dashboard(page, timeout=5000):
+                        print("    [native] PASS — dashboard tanpa solver eksternal")
+                        _native_ok = True
+                        break
+                    try:
+                        fired = page.evaluate("!!window.__thFired")
+                    except Exception:
+                        fired = False
+                    if fired:
+                        print("    [native] callback fired, menunggu dashboard 20s...")
+                        if _wait_dashboard(page, timeout=20000):
+                            print("    [native] PASS — token native")
+                            _native_ok = True
+                        break
+                    # checkbox rendered but unsolved? click it like a human
+                    # (headed only — headless-shell clicks never pass).
+                    try:
+                        if not _tried_cb_click and \
+                                page.locator('iframe[src*="challenges.cloudflare"]').count():
+                            _tried_cb_click = True
+                            _click_turnstile_checkbox(page)
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(2000)
+                if not _native_ok:
+                    print("    [native] tidak lolos, lanjut ke solver eksternal")
+        if _native_ok:
+            return "ok"
+    except Exception as e:
+        print(f"    [native] gagal buka halaman: {str(e)[:80]}")
+
     for attempt in range(3):
         holder, th = _solve_turnstile_async(SITEKEY, f"{BASE}/login?mode=signup")
 
@@ -680,6 +778,8 @@ def _launch_browser(headless=True):
     if os.environ.get("TH_USE_PLAYWRIGHT") != "1":
         from camoufox.sync_api import Camoufox
         return Camoufox(headless=headless)
+    if os.environ.get("TH_HEADED") == "1":
+        headless = False  # headed full build via Xvfb :99 (native auto-pass needs it)
     from playwright.sync_api import sync_playwright
     _pw = sync_playwright().start()
     # slim flags: farm hosts are RAM-tight (multi-GB saved vs zygote default)

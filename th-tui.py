@@ -2385,6 +2385,27 @@ def _solve_captcha(pg, c, timeout=180, proxy=None, pm=None):
     """
     _budget = min(timeout, _th_turnstile_budget(c))
     dlog(f"Turnstile terdeteksi — budget solve {_budget}s (fail fast ke proxy berikutnya)")
+    # JH-blind (no DOM needed): turnstile-min only needs sitekey+URL, and the
+    # widget injects at submit-time so the DOM gate below usually misses it.
+    # Solve first, detect later.
+    try:
+        _gm0 = _load_grok_mod()
+        _sk0 = str(getattr(_gm0, "TURNSTILE_SITEKEY", "") or "") if _gm0 else ""
+    except Exception:
+        _gm0, _sk0 = None, ""
+    if _gm0 and _sk0 and hasattr(_gm0, "solve_turnstile_jh"):
+        try:
+            _purl0 = pg.url
+        except Exception:
+            _purl0 = "https://tokenharbor.ai/login?mode=signup"
+        try:
+            _tok0 = _gm0.solve_turnstile_jh(sitekey=_sk0, page_url=_purl0,
+                                            timeout=max(15, min(60, _budget - 10)))
+            if _tok0:
+                log("Turnstile solved (JH-blind)", "ok")
+                return _tok0
+        except Exception as e:
+            dlog(f"JH-blind gagal ({str(e)[:100]}), lanjut deteksi DOM")
     # detect turnstile iframe presence (FrameLocator has no is_visible/count
     # on all versions — use a plain Locator for detection)
     has_ts = False
@@ -2454,6 +2475,17 @@ def _solve_captcha(pg, c, timeout=180, proxy=None, pm=None):
     except Exception:
         _ph = "?"
     log(f"Solving Turnstile headless (sitekey {sitekey[:12]}..., via {_ph})", "info")
+    # — fase 0: JH-Solver (gratis, ~5-30s, tanpa binary) —
+    tok = None
+    try:
+        _jh_timeout = max(15, min(60, _budget - 10)) if _budget > 10 else min(15, _budget)
+        tok = gm.solve_turnstile_jh(sitekey=sitekey, page_url=_page_url, timeout=_jh_timeout)
+    except Exception as e:
+        dlog(f"JH gagal ({str(e)[:100]}), fallback ke BYCF")
+        tok = None
+    if tok:
+        log("Turnstile solved (JH)", "ok")
+        return tok
     # — fase 1: BYCF (porsi ~setengah budget, maks 30s) —
     _bycf_timeout = max(12, min(30, _budget - 20)) if _budget > 20 else min(12, _budget)
     tok = None

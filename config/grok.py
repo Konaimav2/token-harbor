@@ -577,6 +577,54 @@ def solve_turnstile_camoufox(
     return token
 
 
+def solve_turnstile_jh(
+    sitekey: str = TURNSTILE_SITEKEY,
+    page_url: str = TURNSTILE_PAGE_URL,
+    api_base: str = "https://cap.jhx.my.id",
+    mode: str = "turnstile-min",
+    timeout: int = 120,
+    poll_every: float = 3.0,
+) -> str:
+    """Solve Turnstile via JH-Solver (free, no key, ~5-30s).
+
+    POST /api/createTask {url, sitekey, type} -> {jobId}, poll
+    POST /api/getResult {jobId} until status ready/failed. Polite 3s
+    polling — the service bans flooding IPs permanently.
+    """
+    import time as _t
+    try:
+        cr = std_requests.post(
+            f"{api_base.rstrip('/')}/api/createTask",
+            json={"url": page_url, "sitekey": sitekey, "type": mode},
+            timeout=20,
+        )
+        job = (cr.json() or {}).get("jobId", "")
+        if not job:
+            raise RuntimeError(f"jh createTask: {cr.text[:120]}")
+    except Exception as e:
+        raise RuntimeError(f"jh createTask gagal: {e}")
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        _t.sleep(poll_every)
+        try:
+            gr = std_requests.post(
+                f"{api_base.rstrip('/')}/api/getResult",
+                json={"jobId": job},
+                timeout=20,
+            )
+            data = gr.json() or {}
+        except Exception:
+            continue
+        if data.get("status") == "ready" and data.get("success"):
+            token = ((data.get("solution") or {}).get("token")) or ""
+            if token and len(token) >= 40:
+                return token
+            raise RuntimeError(f"jh token tidak valid: {str(token)[:60]!r}")
+        if data.get("status") == "failed" or data.get("errorCode"):
+            raise RuntimeError(f"jh gagal: {data.get('message', data)}"[:160])
+    raise RuntimeError("jh timeout menunggu hasil")
+
+
 def solve_turnstile_bycf(
     sitekey: str = TURNSTILE_SITEKEY,
     page_url: str = TURNSTILE_PAGE_URL,
